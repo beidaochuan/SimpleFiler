@@ -1,0 +1,35 @@
+name: build
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-x64:
+    runs-on: windows-2022
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake --preset windows-x64
+
+      - name: Build
+        run: cmake --build --preset windows-x64
+
+      - name: Test
+        run: ctest --preset windows-x64
+
+      - name: Upload portable executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: SimpleFiler-windows-x64
+          path: |
+            build/windows-x64/Release/SimpleFiler.exe
+            LICENSE
+            THIRD_PARTY_NOTICES.md
+          if-no-files-found: error
