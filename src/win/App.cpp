@@ -84,7 +84,8 @@ enum ControlId : int {
   IdMoveToOther,
   IdCommandSuggestions,
   IdEditSidebar,
-  IdPromptEdit = 400
+  IdPromptEdit = 400,
+  IdRegisteredAppBase = 1000
 };
 
 struct PromptState final {
@@ -216,11 +217,11 @@ LRESULT CALLBACK SuggestionSubclass(HWND window, UINT message, WPARAM wParam,
 
 LRESULT CALLBACK ListSubclass(HWND window, UINT message, WPARAM wParam,
                               LPARAM lParam, UINT_PTR, DWORD_PTR) {
-  if (message == WM_CHAR && (wParam == L'f' || wParam == L'F' ||
-                             wParam == L'a' || wParam == L'A' ||
-                             wParam == L'c' || wParam == L'C')) {
-    PostMessageW(GetParent(window), kMessageCommandType, wParam, 0);
-    return 0;
+  if (message == WM_CHAR && wParam >= L' ') {
+    if (SendMessageW(GetParent(window), kMessageCommandType, wParam,
+                     reinterpret_cast<LPARAM>(window)) != 0) {
+      return 0;
+    }
   }
   return DefSubclassProc(window, message, wParam, lParam);
 }
@@ -233,17 +234,6 @@ std::wstring HomeDirectory() {
     CoTaskMemFree(path);
   }
   return result;
-}
-
-std::wstring ExtensionType(const FileItem &item) {
-  if (item.IsDirectory())
-    return L"フォルダー";
-  const wchar_t *extension = PathFindExtensionW(item.name.c_str());
-  if (extension == nullptr || *extension == L'\0')
-    return L"ファイル";
-  std::wstring value = extension + 1;
-  std::transform(value.begin(), value.end(), value.begin(), towupper);
-  return value + L" ファイル";
 }
 
 std::wstring LeafName(const std::wstring &path) {
@@ -435,12 +425,8 @@ void App::CreateControls() {
       uiFont_ != nullptr
           ? uiFont_
           : static_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
-  const std::array<std::pair<const wchar_t *, int>, 10> buttons{
-      {{L"←", IdBack},
-       {L"→", IdForward},
-       {L"↑", IdUp},
-       {L"更新", IdRefresh},
-       {L"PC", IdDrives},
+  const std::array<std::pair<const wchar_t *, int>, 6> buttons{
+      {{L"PC", IdDrives},
        {L"1｜2", IdTogglePanes},
        {L"登録", IdToggleSidebar},
        {L"★追加", IdAddBookmark},
@@ -465,16 +451,17 @@ void App::CreateControls() {
                reinterpret_cast<LPARAM>(
                    L"ff フォルダー / aa アプリ / cmd"));
   SetWindowSubclass(searchEdit_, EditSubclass, 1, 2);
-  toolbar_[10] = CreateWindowExW(
+  toolbar_[6] = CreateWindowExW(
       0, L"BUTTON", L"実行", WS_CHILD | WS_VISIBLE | WS_TABSTOP, 0, 0, 10, 10,
       window_, reinterpret_cast<HMENU>(IdSearch), instance_, nullptr);
-  SendMessageW(toolbar_[10], WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+  SendMessageW(toolbar_[6], WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
 
   sidebar_ = CreateWindowExW(
       WS_EX_CLIENTEDGE, WC_LISTBOXW, L"",
       WS_CHILD | WS_VISIBLE | WS_TABSTOP | LBS_NOTIFY | WS_VSCROLL, 0, 0, 10,
       10, window_, reinterpret_cast<HMENU>(IdSidebar), instance_, nullptr);
   SendMessageW(sidebar_, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+  SetWindowSubclass(sidebar_, ListSubclass, 1, 0);
 
   CreatePaneControls(0);
   CreatePaneControls(1);
@@ -534,8 +521,8 @@ void App::CreatePaneControls(int paneIndex) {
   SetWindowSubclass(pane.list, ListSubclass, 1, 0);
   ListView_SetExtendedListViewStyle(
       pane.list, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER | LVS_EX_LABELTIP);
-  const std::array<std::pair<const wchar_t *, int>, 4> columns{
-      {{L"名前", 260}, {L"種類", 120}, {L"サイズ", 100}, {L"更新日時", 140}}};
+  const std::array<std::pair<const wchar_t *, int>, 3> columns{
+      {{L"名前", 300}, {L"サイズ", 100}, {L"更新日時", 140}}};
   for (int column = 0; column < static_cast<int>(columns.size()); ++column) {
     LVCOLUMNW value{};
     value.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_SUBITEM;
@@ -558,8 +545,7 @@ void App::LayoutControls(int width, int height) {
   const int statusHeight = scale(kStatusHeight);
   const int splitterWidth = scale(kSplitterWidth);
   int x = gap;
-  const std::array<int, 10> buttonWidths{38, 38, 38, 54, 42,
-                                         52, 54, 58, 66, 54};
+  const std::array<int, 6> buttonWidths{42, 52, 54, 58, 66, 54};
   for (std::size_t index = 0; index < buttonWidths.size(); ++index) {
     const int buttonWidth = scale(buttonWidths[index]);
     MoveWindow(toolbar_[index], x, gap, buttonWidth, scale(30), TRUE);
@@ -569,7 +555,7 @@ void App::LayoutControls(int width, int height) {
   const int searchWidth =
       std::max(scale(100), width - x - searchButtonWidth - gap * 3);
   MoveWindow(searchEdit_, x, gap + scale(2), searchWidth, scale(26), TRUE);
-  MoveWindow(toolbar_[10], x + searchWidth + gap, gap, searchButtonWidth,
+  MoveWindow(toolbar_[6], x + searchWidth + gap, gap, searchButtonWidth,
              scale(30), TRUE);
   MoveWindow(commandSuggestions_, x, toolbarHeight,
              searchWidth + gap + searchButtonWidth, scale(220), TRUE);
@@ -633,7 +619,7 @@ void App::ApplyDpi(UINT dpi) {
       DeleteObject(uiFont_);
     uiFont_ = newFont;
   }
-  const std::array<int, 4> columnWidths{260, 120, 100, 140};
+  const std::array<int, 3> columnWidths{300, 100, 140};
   for (Pane &pane : panes_) {
     for (int column = 0; column < static_cast<int>(columnWidths.size());
          ++column) {
@@ -683,7 +669,10 @@ void App::CreateAccelerators() {
 void App::InitializeFromSettings(const std::wstring &initialPath) {
   for (int index = 0; index < 2; ++index) {
     panes_[index].showHidden = settings_.panes[index].showHidden;
-    panes_[index].sortColumn = settings_.panes[index].sortColumn;
+    panes_[index].sortColumn =
+        settings_.panes[index].sortColumn == 1
+            ? 0
+            : settings_.panes[index].sortColumn;
     panes_[index].sortAscending = settings_.panes[index].sortAscending;
   }
   const std::wstring home = HomeDirectory();
@@ -797,7 +786,7 @@ void App::Navigate(int paneIndex, const std::wstring &inputPath,
   ListView_SetItemCountEx(pane.list, 0, LVSICF_NOSCROLL);
   SetWindowTextW(pane.address, pane.path.c_str());
   if (paneIndex == activePane_)
-    SetWindowTextW(toolbar_[10], L"実行");
+    SetWindowTextW(toolbar_[6], L"実行");
   if (addHistory) {
     if (!pane.history.empty() && pane.historyIndex + 1 < pane.history.size()) {
       pane.history.erase(pane.history.begin() +
@@ -933,7 +922,7 @@ void App::StartSearch(const std::wstring &query) {
         SearchDirectory(target, paneIndex, generation, root, query, showHidden,
                         token);
       });
-  SetWindowTextW(toolbar_[10], L"中止");
+  SetWindowTextW(toolbar_[6], L"中止");
   Notify(L"検索中: " + query);
 }
 
@@ -963,9 +952,6 @@ void App::SortPane(int paneIndex) {
         int comparison = 0;
         if (left.IsDirectory() != right.IsDirectory()) {
           comparison = left.IsDirectory() ? -1 : 1;
-        } else if (column == 1) {
-          comparison = _wcsicmp(ExtensionType(left).c_str(),
-                                ExtensionType(right).c_str());
         } else if (column == 2) {
           comparison = left.size < right.size   ? -1
                        : left.size > right.size ? 1
@@ -1544,11 +1530,45 @@ void App::DismissCommandSuggestions(bool clearInput) {
   SetFocus(panes_[activePane_].list);
 }
 
-void App::BeginCommandInput(wchar_t character) {
-  const wchar_t text[] = {character, L'\0'};
-  SetWindowTextW(searchEdit_, text);
-  SetFocus(searchEdit_);
-  SendMessageW(searchEdit_, EM_SETSEL, 1, 1);
+bool App::HandleCommandPrefixCharacter(wchar_t character, HWND source) {
+  constexpr ULONGLONG kPrefixTimeoutMilliseconds = 1500;
+  character = static_cast<wchar_t>(
+      std::towlower(static_cast<wint_t>(character)));
+  const ULONGLONG now = GetTickCount64();
+  if (source != commandPrefixSource_ ||
+      now - commandPrefixTick_ > kPrefixTimeoutMilliseconds) {
+    commandPrefixBuffer_.clear();
+  }
+  commandPrefixSource_ = source;
+  commandPrefixTick_ = now;
+
+  std::wstring completedPrefix;
+  if ((character == L'f' || character == L'a') &&
+      commandPrefixBuffer_.size() == 1 &&
+      commandPrefixBuffer_.front() == character) {
+    completedPrefix.assign(2, character);
+  } else if (character == L'd' && commandPrefixBuffer_ == L"cm") {
+    completedPrefix = L"cmd";
+  }
+
+  if (!completedPrefix.empty()) {
+    commandPrefixBuffer_.clear();
+    SetWindowTextW(searchEdit_, completedPrefix.c_str());
+    SetFocus(searchEdit_);
+    SendMessageW(searchEdit_, EM_SETSEL,
+                 static_cast<WPARAM>(completedPrefix.size()),
+                 static_cast<LPARAM>(completedPrefix.size()));
+    return true;
+  }
+
+  if (character == L'f' || character == L'a' || character == L'c') {
+    commandPrefixBuffer_.assign(1, character);
+  } else if (character == L'm' && commandPrefixBuffer_ == L"c") {
+    commandPrefixBuffer_ = L"cm";
+  } else {
+    commandPrefixBuffer_.clear();
+  }
+  return false;
 }
 
 void App::AddCommandRegistration() {
@@ -1641,33 +1661,58 @@ void App::ShowLinkMenu(HWND sourceButton) {
 }
 
 void App::ShowFileMenu(POINT point) {
-  HMENU menu = CreatePopupMenu();
-  AppendMenuW(menu, MF_STRING, IdOpen, L"開く");
-  AppendMenuW(menu, MF_STRING, IdCopy, L"コピー");
-  AppendMenuW(menu, MF_STRING, IdCut, L"切り取り");
-  AppendMenuW(menu, MF_STRING, IdPaste, L"貼り付け");
-  AppendMenuW(menu, MF_STRING, IdNewFolder, L"新しいフォルダー");
-  AppendMenuW(menu, MF_STRING, IdRename, L"名前の変更");
-  AppendMenuW(menu, MF_STRING, IdDelete, L"削除");
-  AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-  AppendMenuW(menu, MF_STRING, IdZipCreate, L"ZIPを作成");
-  AppendMenuW(menu, MF_STRING, IdZipExtract, L"ZIPを展開");
-  AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-  AppendMenuW(menu,
-              MF_STRING | (panes_[activePane_].showHidden ? MF_CHECKED : 0),
-              IdShowHidden, L"隠しファイルを表示");
-  AppendMenuW(menu, MF_STRING, IdProperties, L"プロパティ");
   const auto paths = SelectedPaths();
+  HMENU menu = CreatePopupMenu();
   if (paths.empty()) {
-    for (UINT id : {IdOpen, IdCopy, IdCut, IdRename, IdDelete, IdZipCreate,
-                    IdZipExtract, IdProperties}) {
-      EnableMenuItem(menu, id, MF_BYCOMMAND | MF_GRAYED);
+    AppendMenuW(menu, MF_STRING, IdPaste, L"貼り付け");
+    AppendMenuW(menu, MF_STRING, IdNewFolder, L"新しいフォルダー");
+  } else {
+    AppendMenuW(menu, MF_STRING, IdOpen, L"開く");
+
+    HMENU applications = CreatePopupMenu();
+    bool hasApplication = false;
+    for (std::size_t index = 0; index < settings_.links.size(); ++index) {
+      const RegisteredLink &link = settings_.links[index];
+      if (link.type != LinkType::Application ||
+          IdRegisteredAppBase + index > 0x7fff) {
+        continue;
+      }
+      const std::wstring name = Utf8ToWide(link.name);
+      AppendMenuW(applications, MF_STRING, IdRegisteredAppBase + index,
+                  name.c_str());
+      hasApplication = true;
     }
-  } else if (paths.size() != 1 || !HasZipExtension(paths.front())) {
-    EnableMenuItem(menu, IdZipExtract, MF_BYCOMMAND | MF_GRAYED);
+    if (!hasApplication)
+      AppendMenuW(applications, MF_STRING | MF_GRAYED, 0,
+                  L"登録アプリなし");
+    AppendMenuW(menu, MF_POPUP,
+                reinterpret_cast<UINT_PTR>(applications),
+                L"登録アプリで開く");
+    AppendMenuW(menu, MF_STRING, IdAddAppLink, L"アプリを登録...");
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu, MF_STRING, IdCopy, L"コピー");
+    AppendMenuW(menu, MF_STRING, IdCut, L"切り取り");
+    AppendMenuW(menu, MF_STRING, IdRename, L"名前の変更");
+    AppendMenuW(menu, MF_STRING, IdDelete, L"削除");
+    AppendMenuW(menu, MF_STRING, IdProperties, L"プロパティ");
+    if (paths.size() != 1) {
+      EnableMenuItem(menu, IdOpen, MF_BYCOMMAND | MF_GRAYED);
+      EnableMenuItem(menu, IdRename, MF_BYCOMMAND | MF_GRAYED);
+      EnableMenuItem(menu, IdProperties, MF_BYCOMMAND | MF_GRAYED);
+    }
   }
-  TrackPopupMenu(menu, TPM_RIGHTBUTTON, point.x, point.y, 0, window_, nullptr);
+
+  const UINT selectedCommand =
+      TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, point.x, point.y,
+                     0, window_, nullptr);
   DestroyMenu(menu);
+  if (selectedCommand >= IdRegisteredAppBase &&
+      selectedCommand - IdRegisteredAppBase < settings_.links.size()) {
+    LaunchRegisteredApplication(selectedCommand - IdRegisteredAppBase, false,
+                                true);
+  } else if (selectedCommand != 0) {
+    SendMessageW(window_, WM_COMMAND, selectedCommand, 0);
+  }
 }
 
 void App::CreateZipFromSelection() {
@@ -1942,7 +1987,7 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
       AddCurrentBookmark();
       break;
     case IdAddLink:
-      ShowLinkMenu(toolbar_[8]);
+      ShowLinkMenu(toolbar_[4]);
       break;
     case IdAddFileLink:
       AddLink(false);
@@ -1951,7 +1996,7 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
       AddLink(true);
       break;
     case IdTerminal:
-      ShowTerminalMenu(toolbar_[9]);
+      ShowTerminalMenu(toolbar_[5]);
       break;
     case IdCmd:
       LaunchSelectedTerminal(TerminalKind::CommandPrompt, false);
@@ -1976,7 +2021,7 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
         RetireWorker(panes_[activePane_]);
         ++panes_[activePane_].generation;
         panes_[activePane_].busy = false;
-        SetWindowTextW(toolbar_[10], L"実行");
+        SetWindowTextW(toolbar_[6], L"実行");
         Notify(L"検索を中止しました");
       } else {
         StartSearch(GetWindowTextString(searchEdit_));
@@ -2041,7 +2086,7 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
                        panes_[activePane_].searchMode
                            ? panes_[activePane_].searchQuery.c_str()
                            : L"");
-        SetWindowTextW(toolbar_[10], panes_[activePane_].searchMode &&
+        SetWindowTextW(toolbar_[6], panes_[activePane_].searchMode &&
                                              panes_[activePane_].busy
                                          ? L"中止"
                                          : L"実行");
@@ -2074,7 +2119,7 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
                        panes_[activePane_].searchMode
                            ? panes_[activePane_].searchQuery.c_str()
                            : L"");
-        SetWindowTextW(toolbar_[10], panes_[activePane_].searchMode &&
+        SetWindowTextW(toolbar_[6], panes_[activePane_].searchMode &&
                                              panes_[activePane_].busy
                                          ? L"中止"
                                          : L"実行");
@@ -2086,6 +2131,24 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
       } else if (header->code == NM_RCLICK) {
         activePane_ = paneIndex;
         UpdateActivePaneVisuals();
+        const auto *click = reinterpret_cast<const NMITEMACTIVATE *>(lParam);
+        Pane &pane = panes_[paneIndex];
+        if (click->iItem >= 0) {
+          const UINT state =
+              ListView_GetItemState(pane.list, click->iItem, LVIS_SELECTED);
+          if ((state & LVIS_SELECTED) == 0) {
+            ListView_SetItemState(pane.list, -1, 0,
+                                  LVIS_SELECTED | LVIS_FOCUSED);
+          }
+          ListView_SetItemState(pane.list, click->iItem,
+                                LVIS_SELECTED | LVIS_FOCUSED,
+                                LVIS_SELECTED | LVIS_FOCUSED);
+          ListView_SetSelectionMark(pane.list, click->iItem);
+        } else {
+          ListView_SetItemState(pane.list, -1, 0,
+                                LVIS_SELECTED | LVIS_FOCUSED);
+          ListView_SetSelectionMark(pane.list, -1);
+        }
         POINT point{};
         GetCursorPos(&point);
         ShowFileMenu(point);
@@ -2099,10 +2162,12 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
       } else if (header->code == LVN_COLUMNCLICK) {
         auto *click = reinterpret_cast<NMLISTVIEW *>(lParam);
         Pane &pane = panes_[paneIndex];
-        if (pane.sortColumn == click->iSubItem)
+        constexpr std::array<int, 3> sortColumns{0, 2, 3};
+        const int sortColumn = sortColumns[click->iSubItem];
+        if (pane.sortColumn == sortColumn)
           pane.sortAscending = !pane.sortAscending;
         else {
-          pane.sortColumn = click->iSubItem;
+          pane.sortColumn = sortColumn;
           pane.sortAscending = true;
         }
         SortPane(paneIndex);
@@ -2122,12 +2187,9 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
               text = item.name;
               break;
             case 1:
-              text = ExtensionType(item);
-              break;
-            case 2:
               text = item.IsDirectory() ? L"" : FormatFileSize(item.size);
               break;
-            case 3:
+            case 2:
               text = FormatFileTime(item.modified);
               break;
             default:
@@ -2179,8 +2241,11 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
     }
     break;
   case kMessageCommandType:
-    BeginCommandInput(static_cast<wchar_t>(wParam));
-    return 0;
+    return HandleCommandPrefixCharacter(
+               static_cast<wchar_t>(wParam),
+               reinterpret_cast<HWND>(lParam))
+               ? TRUE
+               : FALSE;
   case kMessageCommandAccept:
     AcceptCommandSuggestion((wParam & 1U) != 0, (wParam & 2U) != 0);
     return 0;
@@ -2233,7 +2298,7 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
         done->generation == panes_[done->pane].generation) {
       panes_[done->pane].busy = false;
       if (done->pane == activePane_)
-        SetWindowTextW(toolbar_[10], L"実行");
+        SetWindowTextW(toolbar_[6], L"実行");
       SortPane(done->pane);
       if (done->error == ERROR_SUCCESS) {
         Notify(std::format(L"{} 項目", done->itemCount));

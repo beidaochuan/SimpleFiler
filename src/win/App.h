@@ -113,7 +113,7 @@ private:
   void MoveCommandSelection(int delta);
   void AcceptCommandSuggestion(bool control = false, bool shift = false);
   void DismissCommandSuggestions(bool clearInput);
-  void BeginCommandInput(wchar_t character);
+  bool HandleCommandPrefixCharacter(wchar_t character, HWND source);
   void AddCommandRegistration();
   void LaunchRegisteredApplication(std::size_t index, bool administrator,
                                    bool passSelection);
@@ -127,7 +127,7 @@ private:
 
   HINSTANCE instance_ = nullptr;
   HWND window_ = nullptr;
-  HWND toolbar_[11]{};
+  HWND toolbar_[7]{};
   HWND searchEdit_ = nullptr;
   HWND commandSuggestions_ = nullptr;
   HWND sidebar_ = nullptr;
@@ -147,6 +147,9 @@ private:
   double splitRatio_ = 0.5;
   std::vector<std::pair<bool, std::size_t>> sidebarMap_;
   std::vector<CommandSuggestion> commandSuggestionItems_;
+  std::wstring commandPrefixBuffer_;
+  HWND commandPrefixSource_ = nullptr;
+  ULONGLONG commandPrefixTick_ = 0;
   AppSettings settings_;
   SettingsStore settingsStore_;
 };

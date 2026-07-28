@@ -135,13 +135,79 @@ try {
         [SimpleFilerNativeMethods]::GetDlgItem($mainWindow, 326)
     $leftAddress =
         [SimpleFilerNativeMethods]::GetDlgItem($mainWindow, 200)
+    $leftList =
+        [SimpleFilerNativeMethods]::GetDlgItem($mainWindow, 210)
+    $rightList =
+        [SimpleFilerNativeMethods]::GetDlgItem($mainWindow, 211)
     $sidebar =
         [SimpleFilerNativeMethods]::GetDlgItem($mainWindow, 220)
     if ($commandEdit -eq [IntPtr]::Zero -or
         $suggestions -eq [IntPtr]::Zero -or
-        $leftAddress -eq [IntPtr]::Zero) {
+        $leftAddress -eq [IntPtr]::Zero -or
+        $leftList -eq [IntPtr]::Zero -or
+        $rightList -eq [IntPtr]::Zero) {
         throw 'Required command-palette controls were not created'
     }
+
+    foreach ($removedButtonId in 100..103) {
+        if ([SimpleFilerNativeMethods]::GetDlgItem(
+                $mainWindow, $removedButtonId) -ne [IntPtr]::Zero) {
+            throw "Removed navigation button $removedButtonId still exists"
+        }
+    }
+
+    $listHeader = [SimpleFilerNativeMethods]::SendMessage(
+        $leftList, 0x101F, [IntPtr]::Zero, [IntPtr]::Zero)
+    $columnCount = [SimpleFilerNativeMethods]::SendMessage(
+        $listHeader, 0x1200, [IntPtr]::Zero, [IntPtr]::Zero).ToInt32()
+    if ($columnCount -ne 3) {
+        throw "File list has $columnCount columns instead of 3"
+    }
+
+    # A single f/a remains list input. Completing ff/aa moves the full prefix
+    # to the command field.
+    [void][SimpleFilerNativeMethods]::SendMessage(
+        $mainWindow, 0x0111, [IntPtr]314, [IntPtr]::Zero)
+    [void][SimpleFilerNativeMethods]::PostMessage(
+        $rightList, 0x0102, [IntPtr][char]'f', [IntPtr]::Zero)
+    Start-Sleep -Milliseconds 100
+    $directInput = [Text.StringBuilder]::new(16)
+    [void][SimpleFilerNativeMethods]::SendMessageGetText(
+        $commandEdit, 0x000D, [IntPtr]$directInput.Capacity, $directInput)
+    if ($directInput.Length -ne 0) {
+        throw 'A single f unexpectedly focused command input'
+    }
+    [void][SimpleFilerNativeMethods]::PostMessage(
+        $rightList, 0x0102, [IntPtr][char]'f', [IntPtr]::Zero)
+    Start-Sleep -Milliseconds 100
+    [void][SimpleFilerNativeMethods]::SendMessageGetText(
+        $commandEdit, 0x000D, [IntPtr]$directInput.Capacity, $directInput)
+    if ($directInput.ToString() -ne 'ff') {
+        throw 'Typing ff in the file list did not focus command input'
+    }
+    [void][SimpleFilerNativeMethods]::SendMessageText(
+        $commandEdit, 0x000C, [IntPtr]::Zero, '')
+    [void][SimpleFilerNativeMethods]::SendMessage(
+        $mainWindow, 0x0111, [IntPtr]314, [IntPtr]::Zero)
+    [void][SimpleFilerNativeMethods]::PostMessage(
+        $leftList, 0x0102, [IntPtr][char]'a', [IntPtr]::Zero)
+    Start-Sleep -Milliseconds 100
+    $directInput.Clear() | Out-Null
+    [void][SimpleFilerNativeMethods]::SendMessageGetText(
+        $commandEdit, 0x000D, [IntPtr]$directInput.Capacity, $directInput)
+    if ($directInput.Length -ne 0) {
+        throw 'A single a unexpectedly focused command input'
+    }
+    [void][SimpleFilerNativeMethods]::PostMessage(
+        $leftList, 0x0102, [IntPtr][char]'a', [IntPtr]::Zero)
+    Start-Sleep -Milliseconds 100
+    [void][SimpleFilerNativeMethods]::SendMessageGetText(
+        $commandEdit, 0x000D, [IntPtr]$directInput.Capacity, $directInput)
+    if ($directInput.ToString() -ne 'aa') {
+        throw 'Typing aa in the file list did not focus command input'
+    }
+    [void][SimpleFilerNativeMethods]::SendMessageText(
+        $commandEdit, 0x000C, [IntPtr]::Zero, '')
 
     [void][SimpleFilerNativeMethods]::SendMessageText(
         $commandEdit, 0x000C, [IntPtr]::Zero, 'ffwork')
