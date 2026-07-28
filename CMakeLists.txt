@@ -20,6 +20,12 @@ add_library(simplefiler_core
 )
 target_include_directories(simplefiler_core PUBLIC src)
 
+if(WIN32)
+    target_compile_definitions(simplefiler_core PRIVATE
+        WIN32_LEAN_AND_MEAN NOMINMAX
+    )
+endif()
+
 if(MSVC)
     target_compile_options(simplefiler_core PRIVATE /W4 /permissive- /utf-8)
 else()
