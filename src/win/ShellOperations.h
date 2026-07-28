@@ -19,6 +19,8 @@ struct OperationResult final {
                                        bool cut);
 [[nodiscard]] std::vector<std::wstring> ReadFilesFromClipboard(bool *cut);
 void PasteFilesAsync(HWND notifyWindow, const std::wstring &destination);
+void TransferFilesAsync(HWND notifyWindow, std::vector<std::wstring> paths,
+                        std::wstring destination, bool move);
 void DeleteFilesAsync(HWND notifyWindow, std::vector<std::wstring> paths,
                       bool permanent);
 void RenameFileAsync(HWND notifyWindow, std::wstring path,

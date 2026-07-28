@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/CommandQuery.h"
 #include "core/Settings.h"
 #include "win/FileEnumerator.h"
 #include "win/TerminalLauncher.h"
@@ -23,6 +24,21 @@ public:
   int Run(int showCommand, const std::wstring &initialPath);
 
 private:
+  enum class CommandSuggestionKind {
+    Folder,
+    Application,
+    Terminal,
+  };
+
+  struct CommandSuggestion final {
+    CommandSuggestionKind kind = CommandSuggestionKind::Folder;
+    std::size_t sourceIndex = 0;
+    bool administrator = false;
+    int score = 0;
+    std::wstring label;
+    std::wstring detail;
+  };
+
   struct Pane final {
     struct RetiredWorker final {
       std::uint64_t generation = 0;
@@ -57,8 +73,11 @@ private:
   void CreateControls();
   void CreatePaneControls(int pane);
   void LayoutControls(int width, int height);
+  void ApplyDpi(UINT dpi);
+  void UpdateActivePaneVisuals();
   void CreateAccelerators();
   void InitializeFromSettings(const std::wstring &initialPath);
+  void VerifySettingsWritable();
   void SaveSettings();
 
   void Navigate(int pane, const std::wstring &path, bool addHistory = true);
@@ -73,6 +92,7 @@ private:
   void OpenSelected();
   void BeginRename();
   void CopySelection(bool cut);
+  void TransferSelectionToOtherPane(bool move);
   void Paste();
   void DeleteSelection(bool permanent);
   void NewFolder();
@@ -81,6 +101,7 @@ private:
   void AddLink(bool application);
   void RebuildSidebar();
   void ActivateSidebarItem(bool administrator = false);
+  void EditSidebarItem();
   void RemoveSidebarItem();
   void ShowTerminalMenu(HWND sourceButton);
   void LaunchSelectedTerminal(TerminalKind kind, bool administrator);
@@ -88,6 +109,14 @@ private:
   void ShowLinkMenu(HWND sourceButton);
   void CreateZipFromSelection();
   void ExtractSelectedZip();
+  void RebuildCommandSuggestions();
+  void MoveCommandSelection(int delta);
+  void AcceptCommandSuggestion(bool control = false, bool shift = false);
+  void DismissCommandSuggestions(bool clearInput);
+  void BeginCommandInput(wchar_t character);
+  void AddCommandRegistration();
+  void LaunchRegisteredApplication(std::size_t index, bool administrator,
+                                   bool passSelection);
 
   [[nodiscard]] std::vector<std::wstring> SelectedPaths() const;
   [[nodiscard]] int PaneIndexFromControl(HWND control) const;
@@ -100,16 +129,24 @@ private:
   HWND window_ = nullptr;
   HWND toolbar_[11]{};
   HWND searchEdit_ = nullptr;
+  HWND commandSuggestions_ = nullptr;
   HWND sidebar_ = nullptr;
   HWND status_ = nullptr;
   HACCEL accelerators_ = nullptr;
+  HBRUSH activePaneBrush_ = nullptr;
+  HFONT uiFont_ = nullptr;
+  UINT dpi_ = USER_DEFAULT_SCREEN_DPI;
   Pane panes_[2];
   int activePane_ = 0;
   bool twoPanes_ = true;
   bool sidebarVisible_ = true;
   bool draggingSplitter_ = false;
+  bool settingsWritable_ = true;
+  std::size_t pendingFileOperations_ = 0;
+  std::size_t pendingZipOperations_ = 0;
   double splitRatio_ = 0.5;
   std::vector<std::pair<bool, std::size_t>> sidebarMap_;
+  std::vector<CommandSuggestion> commandSuggestionItems_;
   AppSettings settings_;
   SettingsStore settingsStore_;
 };

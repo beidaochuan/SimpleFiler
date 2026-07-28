@@ -93,14 +93,24 @@ std::string Utf8ToPowerShellEncodedCommand(const std::string &utf8Path) {
 }
 
 std::wstring EscapeCmdUncPath(const std::wstring &path) {
-  // Windows file names cannot contain a quote. CMD metacharacters are literal
-  // while the path is inside the inner quote pair.
-  return path;
+  // The surrounding quotes are themselves caret-escaped so cmd.exe does not
+  // perform percent expansion before it establishes the quoted argument.
+  // Escape the legal Windows filename characters that remain cmd metacharacters.
+  std::wstring escaped;
+  escaped.reserve(path.size());
+  for (const wchar_t character : path) {
+    if (character == L'%' || character == L'^' || character == L'&' ||
+        character == L'(' || character == L')') {
+      escaped.push_back(L'^');
+    }
+    escaped.push_back(character);
+  }
+  return escaped;
 }
 
 std::wstring BuildCmdUncParameters(const std::wstring &path) {
-  // /S strips the outer quote pair and leaves the inner pair around the path.
-  return L"/D /S /K \"pushd \"" + EscapeCmdUncPath(path) + L"\"\"";
+  // /V:OFF prevents exclamation marks from delayed expansion.
+  return L"/D /V:OFF /K pushd ^\"" + EscapeCmdUncPath(path) + L"^\"";
 }
 
 } // namespace sf

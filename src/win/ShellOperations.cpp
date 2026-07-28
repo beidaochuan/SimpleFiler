@@ -15,8 +15,20 @@ namespace {
 
 constexpr wchar_t kPreferredDropEffect[] = L"Preferred DropEffect";
 
-void Notify(HWND window, HRESULT result, bool aborted) {
+DWORD NotificationProcessId(HWND window) {
+  DWORD processId = 0;
+  GetWindowThreadProcessId(window, &processId);
+  return processId;
+}
+
+void Notify(HWND window, DWORD expectedProcessId, HRESULT result,
+            bool aborted) {
   auto *operation = new OperationResult{result, aborted};
+  if (expectedProcessId == 0 ||
+      NotificationProcessId(window) != expectedProcessId) {
+    delete operation;
+    return;
+  }
   if (!PostMessageW(window, kMessageOperationDone, 0,
                     reinterpret_cast<LPARAM>(operation))) {
     delete operation;
@@ -54,7 +66,8 @@ IFileOperation *CreateOperation(HWND owner, bool recycle) {
   return operation;
 }
 
-void RunPaste(HWND notifyWindow, std::wstring destination,
+void RunPaste(HWND notifyWindow, DWORD notificationProcessId,
+              std::wstring destination,
               std::vector<std::wstring> paths, bool move) {
   const HRESULT initialize = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
   IFileOperation *operation = CreateOperation(notifyWindow, true);
@@ -87,7 +100,7 @@ void RunPaste(HWND notifyWindow, std::wstring destination,
     operation->Release();
   if (SUCCEEDED(initialize))
     CoUninitialize();
-  Notify(notifyWindow, result, aborted != FALSE);
+  Notify(notifyWindow, notificationProcessId, result, aborted != FALSE);
 }
 
 } // namespace
@@ -185,19 +198,37 @@ std::vector<std::wstring> ReadFilesFromClipboard(bool *cut) {
 }
 
 void PasteFilesAsync(HWND notifyWindow, const std::wstring &destination) {
+  const DWORD notificationProcessId = NotificationProcessId(notifyWindow);
   bool cut = false;
   std::vector<std::wstring> paths = ReadFilesFromClipboard(&cut);
   if (paths.empty()) {
-    Notify(notifyWindow, HRESULT_FROM_WIN32(ERROR_NO_MORE_ITEMS), false);
+    Notify(notifyWindow, notificationProcessId,
+           HRESULT_FROM_WIN32(ERROR_NO_MORE_ITEMS), false);
     return;
   }
-  std::thread(RunPaste, notifyWindow, destination, std::move(paths), cut)
+  std::thread(RunPaste, notifyWindow, notificationProcessId, destination,
+              std::move(paths), cut)
+      .detach();
+}
+
+void TransferFilesAsync(HWND notifyWindow, std::vector<std::wstring> paths,
+                        std::wstring destination, bool move) {
+  const DWORD notificationProcessId = NotificationProcessId(notifyWindow);
+  if (paths.empty() || destination.empty()) {
+    Notify(notifyWindow, notificationProcessId,
+           HRESULT_FROM_WIN32(ERROR_INVALID_PARAMETER), false);
+    return;
+  }
+  std::thread(RunPaste, notifyWindow, notificationProcessId,
+              std::move(destination), std::move(paths), move)
       .detach();
 }
 
 void DeleteFilesAsync(HWND notifyWindow, std::vector<std::wstring> paths,
                       bool permanent) {
-  std::thread([notifyWindow, paths = std::move(paths), permanent]() {
+  const DWORD notificationProcessId = NotificationProcessId(notifyWindow);
+  std::thread([notifyWindow, notificationProcessId, paths = std::move(paths),
+               permanent]() {
     const HRESULT initialize =
         CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     IFileOperation *operation = CreateOperation(notifyWindow, !permanent);
@@ -224,13 +255,14 @@ void DeleteFilesAsync(HWND notifyWindow, std::vector<std::wstring> paths,
       operation->Release();
     if (SUCCEEDED(initialize))
       CoUninitialize();
-    Notify(notifyWindow, result, aborted != FALSE);
+    Notify(notifyWindow, notificationProcessId, result, aborted != FALSE);
   }).detach();
 }
 
 void RenameFileAsync(HWND notifyWindow, std::wstring path,
                      std::wstring newName) {
-  std::thread([notifyWindow, path = std::move(path),
+  const DWORD notificationProcessId = NotificationProcessId(notifyWindow);
+  std::thread([notifyWindow, notificationProcessId, path = std::move(path),
                newName = std::move(newName)] {
     const HRESULT initialize =
         CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
@@ -250,13 +282,15 @@ void RenameFileAsync(HWND notifyWindow, std::wstring path,
       operation->Release();
     if (SUCCEEDED(initialize))
       CoUninitialize();
-    Notify(notifyWindow, result, aborted != FALSE);
+    Notify(notifyWindow, notificationProcessId, result, aborted != FALSE);
   }).detach();
 }
 
 void CreateFolderAsync(HWND notifyWindow, std::wstring parent,
                        std::wstring name) {
-  std::thread([notifyWindow, parent = std::move(parent),
+  const DWORD notificationProcessId = NotificationProcessId(notifyWindow);
+  std::thread([notifyWindow, notificationProcessId,
+               parent = std::move(parent),
                name = std::move(name)] {
     const HRESULT initialize =
         CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
@@ -279,7 +313,7 @@ void CreateFolderAsync(HWND notifyWindow, std::wstring parent,
       operation->Release();
     if (SUCCEEDED(initialize))
       CoUninitialize();
-    Notify(notifyWindow, result, aborted != FALSE);
+    Notify(notifyWindow, notificationProcessId, result, aborted != FALSE);
   }).detach();
 }
 

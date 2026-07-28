@@ -14,6 +14,10 @@ struct Bookmark final {
   std::string id;
   std::string name;
   std::string path;
+  // These fields stay at the end so existing three-value aggregate
+  // initializers remain source-compatible.
+  std::string alias;
+  std::vector<std::string> keywords;
 };
 
 struct RegisteredLink final {
@@ -23,6 +27,11 @@ struct RegisteredLink final {
   std::string target;
   std::string arguments;
   std::string workingDirectory;
+  // These fields stay at the end so existing six-value aggregate
+  // initializers remain source-compatible.
+  std::string alias;
+  std::vector<std::string> keywords;
+  bool runAsAdministrator = false;
 };
 
 struct PaneSettings final {

@@ -30,6 +30,58 @@ std::string StringOr(const Json *value, const std::string &fallback = {}) {
   return fallback;
 }
 
+std::vector<std::string> StringListOr(
+    const Json *value, const std::vector<std::string> &fallback = {}) {
+  if (value == nullptr)
+    return fallback;
+
+  // Accept a single string as a legacy/convenience representation. New
+  // settings are always written as an array.
+  if (const auto string = value->AsString())
+    return {*string};
+
+  const auto array = value->AsArray();
+  if (array == nullptr)
+    return fallback;
+
+  std::vector<std::string> result;
+  result.reserve(array->size());
+  for (const Json &entry : *array) {
+    if (const auto string = entry.AsString())
+      result.push_back(*string);
+  }
+  return result;
+}
+
+Json::Array StringListToJson(const std::vector<std::string> &values) {
+  Json::Array result;
+  result.reserve(values.size());
+  for (const std::string &value : values)
+    result.emplace_back(value);
+  return result;
+}
+
+Json::Object PreservedEntryObject(const Json &root, const char *collection,
+                                  const std::string &id) {
+  if (id.empty())
+    return {};
+
+  const Json *entries = root.Find(collection);
+  if (entries == nullptr)
+    return {};
+  const auto array = entries->AsArray();
+  if (array == nullptr)
+    return {};
+
+  for (const Json &entry : *array) {
+    if (StringOr(entry.Find("id")) != id)
+      continue;
+    if (const auto object = entry.AsObject())
+      return *object;
+  }
+  return {};
+}
+
 int IntOr(const Json *value, int fallback) {
   if (value != nullptr) {
     if (const auto number = value->AsNumber())
@@ -77,8 +129,18 @@ std::filesystem::path BrokenPath(const std::filesystem::path &original) {
   const auto count = std::chrono::duration_cast<std::chrono::seconds>(
                          std::chrono::system_clock::now().time_since_epoch())
                          .count();
-  return std::filesystem::path(original.string() + ".broken-" +
-                               std::to_string(count));
+  const std::string baseSuffix = ".broken-" + std::to_string(count);
+  for (int attempt = 0; attempt < 1000; ++attempt) {
+    std::filesystem::path candidate = original;
+    candidate += std::filesystem::path(
+        baseSuffix + (attempt == 0 ? "" : "-" + std::to_string(attempt)));
+    std::error_code existsError;
+    if (!std::filesystem::exists(candidate, existsError))
+      return candidate;
+  }
+  std::filesystem::path fallback = original;
+  fallback += std::filesystem::path(baseSuffix + "-" + MakeStableId());
+  return fallback;
 }
 
 } // namespace
@@ -102,6 +164,9 @@ SettingsLoadResult SettingsStore::Load() const {
     result.warning =
         "設定ファイルが破損しているため既定値で起動しました: " + parseError;
     std::filesystem::rename(path_, BrokenPath(path_), error);
+    if (error)
+      result.warning += "（破損設定の退避にも失敗しました: " +
+                        error.message() + "）";
     return result;
   }
 
@@ -144,6 +209,8 @@ SettingsLoadResult SettingsStore::Load() const {
         bookmark.id = StringOr(value.Find("id"));
         bookmark.name = StringOr(value.Find("name"));
         bookmark.path = StringOr(value.Find("path"));
+        bookmark.alias = StringOr(value.Find("alias"));
+        bookmark.keywords = StringListOr(value.Find("keywords"));
         if (!bookmark.name.empty() && !bookmark.path.empty()) {
           if (bookmark.id.empty())
             bookmark.id = MakeStableId();
@@ -164,6 +231,10 @@ SettingsLoadResult SettingsStore::Load() const {
         link.target = StringOr(value.Find("target"));
         link.arguments = StringOr(value.Find("arguments"));
         link.workingDirectory = StringOr(value.Find("workingDirectory"));
+        link.alias = StringOr(value.Find("alias"));
+        link.keywords = StringListOr(value.Find("keywords"));
+        link.runAsAdministrator =
+            BoolOr(value.Find("runAsAdministrator"), false);
         if (!link.name.empty() && !link.target.empty()) {
           if (link.id.empty())
             link.id = MakeStableId();
@@ -202,23 +273,29 @@ bool SettingsStore::Save(const AppSettings &settings,
 
   Json::Array bookmarks;
   for (const Bookmark &bookmark : settings.bookmarks) {
-    Json::Object value;
+    Json::Object value =
+        PreservedEntryObject(root, "bookmarks", bookmark.id);
     value["id"] = bookmark.id;
     value["name"] = bookmark.name;
     value["path"] = bookmark.path;
+    value["alias"] = bookmark.alias;
+    value["keywords"] = StringListToJson(bookmark.keywords);
     bookmarks.emplace_back(std::move(value));
   }
   root["bookmarks"] = std::move(bookmarks);
 
   Json::Array links;
   for (const RegisteredLink &link : settings.links) {
-    Json::Object value;
+    Json::Object value = PreservedEntryObject(root, "links", link.id);
     value["id"] = link.id;
     value["type"] = link.type == LinkType::Application ? "app" : "file";
     value["name"] = link.name;
     value["target"] = link.target;
     value["arguments"] = link.arguments;
     value["workingDirectory"] = link.workingDirectory;
+    value["alias"] = link.alias;
+    value["keywords"] = StringListToJson(link.keywords);
+    value["runAsAdministrator"] = link.runAsAdministrator;
     links.emplace_back(std::move(value));
   }
   root["links"] = std::move(links);

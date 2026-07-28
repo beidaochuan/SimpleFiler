@@ -13,8 +13,11 @@ if(MSVC)
 endif()
 
 add_library(simplefiler_core
+    src/core/AppArguments.cpp
     src/core/ArchivePath.cpp
+    src/core/CommandQuery.cpp
     src/core/Json.cpp
+    src/core/PortablePath.cpp
     src/core/Settings.cpp
     src/core/TerminalCommand.cpp
 )
@@ -105,4 +108,121 @@ if(SIMPLEFILER_BUILD_TESTS)
         target_compile_options(simplefiler_tests PRIVATE -Wall -Wextra -Wpedantic)
     endif()
     add_test(NAME simplefiler_core_tests COMMAND simplefiler_tests)
+    add_executable(simplefiler_app_arguments_tests
+        tests/AppArgumentsTests.cpp
+    )
+    target_link_libraries(simplefiler_app_arguments_tests
+        PRIVATE simplefiler_core
+    )
+    if(MSVC)
+        target_compile_options(simplefiler_app_arguments_tests
+            PRIVATE /W4 /permissive- /utf-8
+        )
+    else()
+        target_compile_options(simplefiler_app_arguments_tests
+            PRIVATE -Wall -Wextra -Wpedantic
+        )
+    endif()
+    add_test(
+        NAME simplefiler_app_arguments_tests
+        COMMAND simplefiler_app_arguments_tests
+    )
+    add_executable(simplefiler_portable_path_tests
+        tests/PortablePathTests.cpp
+    )
+    target_link_libraries(simplefiler_portable_path_tests
+        PRIVATE simplefiler_core
+    )
+    if(MSVC)
+        target_compile_options(simplefiler_portable_path_tests
+            PRIVATE /W4 /permissive- /utf-8
+        )
+    else()
+        target_compile_options(simplefiler_portable_path_tests
+            PRIVATE -Wall -Wextra -Wpedantic
+        )
+    endif()
+    add_test(
+        NAME simplefiler_portable_path_tests
+        COMMAND simplefiler_portable_path_tests
+    )
+    if(WIN32)
+        add_executable(simplefiler_windows_file_tests
+            tests/WindowsFileOperationsTests.cpp
+            src/win/ShellOperations.cpp
+        )
+        target_include_directories(simplefiler_windows_file_tests PRIVATE src)
+        target_compile_definitions(simplefiler_windows_file_tests PRIVATE
+            UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX
+            _WIN32_WINNT=0x0A00 NTDDI_VERSION=0x0A000000
+        )
+        if(MSVC)
+            target_compile_options(simplefiler_windows_file_tests
+                PRIVATE /W4 /permissive- /utf-8
+            )
+        endif()
+        target_link_libraries(simplefiler_windows_file_tests PRIVATE
+            simplefiler_core shell32 ole32 uuid
+        )
+        add_test(
+            NAME simplefiler_windows_file_tests
+            COMMAND simplefiler_windows_file_tests
+        )
+        set_tests_properties(
+            simplefiler_windows_file_tests PROPERTIES TIMEOUT 30
+        )
+        add_executable(simplefiler_file_enumerator_tests
+            tests/FileEnumeratorTests.cpp
+            src/win/FileEnumerator.cpp
+        )
+        target_include_directories(simplefiler_file_enumerator_tests
+            PRIVATE src
+        )
+        target_compile_definitions(simplefiler_file_enumerator_tests PRIVATE
+            UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX
+            _WIN32_WINNT=0x0A00 NTDDI_VERSION=0x0A000000
+        )
+        if(MSVC)
+            target_compile_options(simplefiler_file_enumerator_tests
+                PRIVATE /W4 /permissive- /utf-8
+            )
+        endif()
+        target_link_libraries(simplefiler_file_enumerator_tests PRIVATE
+            shell32
+        )
+        add_test(
+            NAME simplefiler_file_enumerator_tests
+            COMMAND simplefiler_file_enumerator_tests
+        )
+        set_tests_properties(
+            simplefiler_file_enumerator_tests PROPERTIES TIMEOUT 120
+        )
+        add_test(
+            NAME simplefiler_ui_smoke
+            COMMAND powershell -NoProfile -ExecutionPolicy Bypass
+                    -File ${CMAKE_CURRENT_SOURCE_DIR}/tests/UiSmoke.ps1
+                    -Executable $<TARGET_FILE:SimpleFiler>
+        )
+        set_tests_properties(simplefiler_ui_smoke PROPERTIES TIMEOUT 45)
+    endif()
+endif()
+
+if(WIN32)
+    install(TARGETS SimpleFiler RUNTIME DESTINATION .)
+    install(FILES
+        README.md
+        PLAN.md
+        LICENSE
+        THIRD_PARTY_NOTICES.md
+        DESTINATION .
+    )
+    set(CPACK_GENERATOR ZIP)
+    set(CPACK_PACKAGE_NAME "SimpleFiler")
+    set(CPACK_PACKAGE_VENDOR "SimpleFiler")
+    set(CPACK_PACKAGE_VERSION ${PROJECT_VERSION})
+    set(CPACK_PACKAGE_FILE_NAME
+        "SimpleFiler-${PROJECT_VERSION}-windows-x64"
+    )
+    set(CPACK_INCLUDE_TOPLEVEL_DIRECTORY ON)
+    include(CPack)
 endif()

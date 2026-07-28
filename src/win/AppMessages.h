@@ -10,5 +10,10 @@ inline constexpr UINT kMessageOperationDone = WM_APP + 3;
 inline constexpr UINT kMessageNavigateAddress = WM_APP + 4;
 inline constexpr UINT kMessageSearch = WM_APP + 5;
 inline constexpr UINT kMessageZipDone = WM_APP + 6;
+inline constexpr UINT kMessageCommandType = WM_APP + 7;
+inline constexpr UINT kMessageCommandAccept = WM_APP + 8;
+inline constexpr UINT kMessageCommandMove = WM_APP + 9;
+inline constexpr UINT kMessageCommandDismiss = WM_APP + 10;
+inline constexpr UINT kMessageCommandNew = WM_APP + 11;
 
 } // namespace sf::win

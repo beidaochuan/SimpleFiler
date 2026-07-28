@@ -1,5 +1,7 @@
 #include "win/App.h"
 
+#include "core/AppArguments.h"
+#include "core/PortablePath.h"
 #include "win/AppMessages.h"
 #include "win/ShellOperations.h"
 #include "win/TerminalLauncher.h"
@@ -16,10 +18,14 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cwctype>
 #include <filesystem>
 #include <format>
+#include <fstream>
 #include <memory>
 #include <numeric>
+#include <tuple>
+#include <unordered_set>
 
 namespace sf::win {
 namespace {
@@ -74,6 +80,10 @@ enum ControlId : int {
   IdCmdAdmin,
   IdPowerShell,
   IdPowerShellAdmin,
+  IdCopyToOther,
+  IdMoveToOther,
+  IdCommandSuggestions,
+  IdEditSidebar,
   IdPromptEdit = 400
 };
 
@@ -82,6 +92,8 @@ struct PromptState final {
   std::wstring value;
   bool accepted = false;
   HWND edit = nullptr;
+  HFONT font = nullptr;
+  UINT dpi = USER_DEFAULT_SCREEN_DPI;
 };
 
 LRESULT CALLBACK PromptProcedure(HWND window, UINT message, WPARAM wParam,
@@ -95,22 +107,32 @@ LRESULT CALLBACK PromptProcedure(HWND window, UINT message, WPARAM wParam,
   }
   switch (message) {
   case WM_CREATE: {
-    const HFONT font = static_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
+    const auto scale = [state](int value) {
+      return MulDiv(value, static_cast<int>(state->dpi),
+                    USER_DEFAULT_SCREEN_DPI);
+    };
+    const HFONT font =
+        state->font != nullptr
+            ? state->font
+            : static_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
     HWND label = CreateWindowExW(0, L"STATIC", state->label.c_str(),
-                                 WS_CHILD | WS_VISIBLE, 12, 12, 396, 20, window,
-                                 nullptr, nullptr, nullptr);
+                                 WS_CHILD | WS_VISIBLE, scale(12), scale(12),
+                                 scale(396), scale(20), window, nullptr, nullptr,
+                                 nullptr);
     state->edit = CreateWindowExW(
         WS_EX_CLIENTEDGE, L"EDIT", state->value.c_str(),
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL, 12, 36, 396, 25,
-        window, reinterpret_cast<HMENU>(IdPromptEdit), nullptr, nullptr);
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL, scale(12),
+        scale(36), scale(396), scale(25), window,
+        reinterpret_cast<HMENU>(IdPromptEdit), nullptr, nullptr);
     HWND ok = CreateWindowExW(
         0, L"BUTTON", L"OK",
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON, 236, 72, 82, 27,
-        window, reinterpret_cast<HMENU>(IDOK), nullptr, nullptr);
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON, scale(236),
+        scale(72), scale(82), scale(27), window,
+        reinterpret_cast<HMENU>(IDOK), nullptr, nullptr);
     HWND cancel = CreateWindowExW(
-        0, L"BUTTON", L"キャンセル", WS_CHILD | WS_VISIBLE | WS_TABSTOP, 326,
-        72, 82, 27, window, reinterpret_cast<HMENU>(IDCANCEL), nullptr,
-        nullptr);
+        0, L"BUTTON", L"キャンセル", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+        scale(326), scale(72), scale(82), scale(27), window,
+        reinterpret_cast<HMENU>(IDCANCEL), nullptr, nullptr);
     for (HWND control : {label, state->edit, ok, cancel}) {
       SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
     }
@@ -139,10 +161,65 @@ LRESULT CALLBACK PromptProcedure(HWND window, UINT message, WPARAM wParam,
 
 LRESULT CALLBACK EditSubclass(HWND window, UINT message, WPARAM wParam,
                               LPARAM lParam, UINT_PTR, DWORD_PTR reference) {
-  if (message == WM_KEYDOWN && wParam == VK_RETURN) {
-    const UINT target =
-        reference < 2 ? kMessageNavigateAddress : kMessageSearch;
-    PostMessageW(GetParent(window), target, static_cast<WPARAM>(reference), 0);
+  if (message == WM_KEYDOWN) {
+    if (reference == 2) {
+      if (wParam == L'N' && (GetKeyState(VK_CONTROL) & 0x8000) != 0) {
+        SendMessageW(GetParent(window), kMessageCommandNew, 0, 0);
+        return 0;
+      }
+      if (wParam == VK_RETURN) {
+        const WPARAM modifiers =
+            ((GetKeyState(VK_CONTROL) & 0x8000) != 0 ? 1U : 0U) |
+            ((GetKeyState(VK_SHIFT) & 0x8000) != 0 ? 2U : 0U);
+        SendMessageW(GetParent(window), kMessageCommandAccept, modifiers, 0);
+        return 0;
+      }
+      if (wParam == VK_UP || wParam == VK_DOWN) {
+        SendMessageW(GetParent(window), kMessageCommandMove, 0,
+                     wParam == VK_UP ? -1 : 1);
+        return 0;
+      }
+      if (wParam == VK_ESCAPE) {
+        SendMessageW(GetParent(window), kMessageCommandDismiss, 0, 0);
+        return 0;
+      }
+    } else if (wParam == VK_RETURN) {
+      PostMessageW(GetParent(window), kMessageNavigateAddress,
+                   static_cast<WPARAM>(reference), 0);
+      return 0;
+    }
+  }
+  return DefSubclassProc(window, message, wParam, lParam);
+}
+
+LRESULT CALLBACK SuggestionSubclass(HWND window, UINT message, WPARAM wParam,
+                                    LPARAM lParam, UINT_PTR, DWORD_PTR) {
+  if (message == WM_KEYDOWN) {
+    if (wParam == L'N' && (GetKeyState(VK_CONTROL) & 0x8000) != 0) {
+      SendMessageW(GetParent(window), kMessageCommandNew, 0, 0);
+      return 0;
+    }
+    if (wParam == VK_RETURN) {
+      const WPARAM modifiers =
+          ((GetKeyState(VK_CONTROL) & 0x8000) != 0 ? 1U : 0U) |
+          ((GetKeyState(VK_SHIFT) & 0x8000) != 0 ? 2U : 0U);
+      SendMessageW(GetParent(window), kMessageCommandAccept, modifiers, 0);
+      return 0;
+    }
+    if (wParam == VK_ESCAPE) {
+      SendMessageW(GetParent(window), kMessageCommandDismiss, 0, 0);
+      return 0;
+    }
+  }
+  return DefSubclassProc(window, message, wParam, lParam);
+}
+
+LRESULT CALLBACK ListSubclass(HWND window, UINT message, WPARAM wParam,
+                              LPARAM lParam, UINT_PTR, DWORD_PTR) {
+  if (message == WM_CHAR && (wParam == L'f' || wParam == L'F' ||
+                             wParam == L'a' || wParam == L'A' ||
+                             wParam == L'c' || wParam == L'C')) {
+    PostMessageW(GetParent(window), kMessageCommandType, wParam, 0);
     return 0;
   }
   return DefSubclassProc(window, message, wParam, lParam);
@@ -208,10 +285,61 @@ std::wstring PickFolder(HWND owner, const wchar_t *title) {
   return path;
 }
 
+std::vector<std::string> SplitKeywords(const std::wstring &text) {
+  std::vector<std::string> result;
+  std::wstring current;
+  const auto flush = [&result, &current] {
+    if (!current.empty()) {
+      result.push_back(WideToUtf8(current));
+      current.clear();
+    }
+  };
+  for (const wchar_t character : text) {
+    if (std::iswspace(static_cast<wint_t>(character)) != 0 ||
+        character == L',' || character == L';' || character == L'、') {
+      flush();
+    } else {
+      current.push_back(character);
+    }
+  }
+  flush();
+  return result;
+}
+
+std::wstring JoinKeywords(const std::vector<std::string> &keywords) {
+  std::wstring result;
+  for (const std::string &keyword : keywords) {
+    if (!result.empty())
+      result.push_back(L' ');
+    result += Utf8ToWide(keyword);
+  }
+  return result;
+}
+
+std::wstring ResolveAppPath(const std::wstring &path) {
+  return sf::ResolvePortablePath(path, ExecutablePath().parent_path())
+      .wstring();
+}
+
+std::wstring MakeAppPath(const std::wstring &path) {
+  return sf::MakePortablePath(path, ExecutablePath().parent_path()).wstring();
+}
+
+HFONT CreateUiFont(UINT dpi) {
+  NONCLIENTMETRICSW metrics{};
+  metrics.cbSize = sizeof(metrics);
+  if (!SystemParametersInfoForDpi(SPI_GETNONCLIENTMETRICS, sizeof(metrics),
+                                  &metrics, 0, dpi)) {
+    return nullptr;
+  }
+  return CreateFontIndirectW(&metrics.lfMessageFont);
+}
+
 } // namespace
 
 App::App(HINSTANCE instance)
     : instance_(instance),
+      activePaneBrush_(CreateSolidBrush(RGB(238, 246, 255))),
       settingsStore_(ExecutablePath().parent_path() / L"simplefiler.json") {}
 
 App::~App() {
@@ -223,6 +351,10 @@ App::~App() {
   }
   if (accelerators_ != nullptr)
     DestroyAcceleratorTable(accelerators_);
+  if (activePaneBrush_ != nullptr)
+    DeleteObject(activePaneBrush_);
+  if (uiFont_ != nullptr)
+    DeleteObject(uiFont_);
 }
 
 int App::Run(int showCommand, const std::wstring &initialPath) {
@@ -232,7 +364,10 @@ int App::Run(int showCommand, const std::wstring &initialPath) {
 
   MSG message{};
   while (GetMessageW(&message, nullptr, 0, 0) > 0) {
-    if (accelerators_ == nullptr ||
+    const HWND focus = GetFocus();
+    const bool paneHasFocus =
+        focus == panes_[0].list || focus == panes_[1].list;
+    if (accelerators_ == nullptr || !paneHasFocus ||
         !TranslateAcceleratorW(window_, accelerators_, &message)) {
       TranslateMessage(&message);
       DispatchMessageW(&message);
@@ -287,13 +422,19 @@ bool App::CreateMainWindow(int showCommand) {
   CreateAccelerators();
   ShowWindow(window_, settings_.maximized ? SW_MAXIMIZE : showCommand);
   UpdateWindow(window_);
+  VerifySettingsWritable();
   if (!loaded.warning.empty())
     Notify(Utf8ToWide(loaded.warning), true);
   return true;
 }
 
 void App::CreateControls() {
-  const HFONT font = static_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
+  dpi_ = GetDpiForWindow(window_);
+  uiFont_ = CreateUiFont(dpi_);
+  const HFONT font =
+      uiFont_ != nullptr
+          ? uiFont_
+          : static_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
   const std::array<std::pair<const wchar_t *, int>, 10> buttons{
       {{L"←", IdBack},
        {L"→", IdForward},
@@ -321,10 +462,11 @@ void App::CreateControls() {
       window_, reinterpret_cast<HMENU>(IdSearchEdit), instance_, nullptr);
   SendMessageW(searchEdit_, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
   SendMessageW(searchEdit_, EM_SETCUEBANNER, TRUE,
-               reinterpret_cast<LPARAM>(L"名前を検索"));
+               reinterpret_cast<LPARAM>(
+                   L"ff フォルダー / aa アプリ / cmd"));
   SetWindowSubclass(searchEdit_, EditSubclass, 1, 2);
   toolbar_[10] = CreateWindowExW(
-      0, L"BUTTON", L"検索", WS_CHILD | WS_VISIBLE | WS_TABSTOP, 0, 0, 10, 10,
+      0, L"BUTTON", L"実行", WS_CHILD | WS_VISIBLE | WS_TABSTOP, 0, 0, 10, 10,
       window_, reinterpret_cast<HMENU>(IdSearch), instance_, nullptr);
   SendMessageW(toolbar_[10], WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
 
@@ -336,6 +478,14 @@ void App::CreateControls() {
 
   CreatePaneControls(0);
   CreatePaneControls(1);
+  commandSuggestions_ = CreateWindowExW(
+      WS_EX_CLIENTEDGE, WC_LISTBOXW, L"",
+      WS_CHILD | WS_VSCROLL | LBS_NOTIFY | LBS_NOINTEGRALHEIGHT, 0, 0, 10,
+      10, window_, reinterpret_cast<HMENU>(IdCommandSuggestions), instance_,
+      nullptr);
+  SendMessageW(commandSuggestions_, WM_SETFONT,
+               reinterpret_cast<WPARAM>(font), TRUE);
+  SetWindowSubclass(commandSuggestions_, SuggestionSubclass, 1, 0);
   status_ = CreateWindowExW(0, L"STATIC", L"準備完了",
                             WS_CHILD | WS_VISIBLE | SS_LEFT, 0, 0, 10, 10,
                             window_, nullptr, instance_, nullptr);
@@ -354,11 +504,15 @@ void App::CreateControls() {
   GetClientRect(window_, &client);
   LayoutControls(client.right, client.bottom);
   RebuildSidebar();
+  UpdateActivePaneVisuals();
 }
 
 void App::CreatePaneControls(int paneIndex) {
   Pane &pane = panes_[paneIndex];
-  const HFONT font = static_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
+  const HFONT font =
+      uiFont_ != nullptr
+          ? uiFont_
+          : static_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
   pane.address = CreateWindowExW(
       WS_EX_CLIENTEDGE, L"EDIT", L"",
       WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL, 0, 0, 10, 10,
@@ -377,6 +531,7 @@ void App::CreatePaneControls(int paneIndex) {
       reinterpret_cast<HMENU>(paneIndex == 0 ? IdLeftList : IdRightList),
       instance_, nullptr);
   SendMessageW(pane.list, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+  SetWindowSubclass(pane.list, ListSubclass, 1, 0);
   ListView_SetExtendedListViewStyle(
       pane.list, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER | LVS_EX_LABELTIP);
   const std::array<std::pair<const wchar_t *, int>, 4> columns{
@@ -385,33 +540,45 @@ void App::CreatePaneControls(int paneIndex) {
     LVCOLUMNW value{};
     value.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_SUBITEM;
     value.pszText = const_cast<wchar_t *>(columns[column].first);
-    value.cx = columns[column].second;
+    value.cx =
+        MulDiv(columns[column].second, static_cast<int>(dpi_),
+               USER_DEFAULT_SCREEN_DPI);
     value.iSubItem = column;
     ListView_InsertColumn(pane.list, column, &value);
   }
 }
 
 void App::LayoutControls(int width, int height) {
-  constexpr int gap = 4;
+  const auto scale = [this](int value) {
+    return MulDiv(value, static_cast<int>(dpi_), USER_DEFAULT_SCREEN_DPI);
+  };
+  const int gap = scale(4);
+  const int toolbarHeight = scale(kToolbarHeight);
+  const int addressHeight = scale(kAddressHeight);
+  const int statusHeight = scale(kStatusHeight);
+  const int splitterWidth = scale(kSplitterWidth);
   int x = gap;
   const std::array<int, 10> buttonWidths{38, 38, 38, 54, 42,
                                          52, 54, 58, 66, 54};
   for (std::size_t index = 0; index < buttonWidths.size(); ++index) {
-    MoveWindow(toolbar_[index], x, gap, buttonWidths[index], 30, TRUE);
-    x += buttonWidths[index] + gap;
+    const int buttonWidth = scale(buttonWidths[index]);
+    MoveWindow(toolbar_[index], x, gap, buttonWidth, scale(30), TRUE);
+    x += buttonWidth + gap;
   }
-  const int searchButtonWidth = 50;
+  const int searchButtonWidth = scale(50);
   const int searchWidth =
-      std::max(100, width - x - searchButtonWidth - gap * 3);
-  MoveWindow(searchEdit_, x, gap + 2, searchWidth, 26, TRUE);
-  MoveWindow(toolbar_[10], x + searchWidth + gap, gap, searchButtonWidth, 30,
-             TRUE);
+      std::max(scale(100), width - x - searchButtonWidth - gap * 3);
+  MoveWindow(searchEdit_, x, gap + scale(2), searchWidth, scale(26), TRUE);
+  MoveWindow(toolbar_[10], x + searchWidth + gap, gap, searchButtonWidth,
+             scale(30), TRUE);
+  MoveWindow(commandSuggestions_, x, toolbarHeight,
+             searchWidth + gap + searchButtonWidth, scale(220), TRUE);
 
-  const int contentTop = kToolbarHeight;
-  const int contentBottom = std::max(contentTop, height - kStatusHeight);
+  const int contentTop = toolbarHeight;
+  const int contentBottom = std::max(contentTop, height - statusHeight);
   const int contentHeight = contentBottom - contentTop;
   const int sidebarWidth =
-      sidebarVisible_ ? std::min(kSidebarWidth, width / 3) : 0;
+      sidebarVisible_ ? std::min(scale(kSidebarWidth), width / 3) : 0;
   ShowWindow(sidebar_, sidebarVisible_ ? SW_SHOW : SW_HIDE);
   if (sidebarVisible_) {
     MoveWindow(sidebar_, gap, contentTop, sidebarWidth - gap, contentHeight,
@@ -423,25 +590,72 @@ void App::LayoutControls(int width, int height) {
   int rightLeft = width;
   int rightWidth = 0;
   if (twoPanes_) {
-    leftWidth = static_cast<int>((paneWidth - kSplitterWidth) * splitRatio_);
-    rightLeft = paneLeft + leftWidth + kSplitterWidth;
+    leftWidth = static_cast<int>((paneWidth - splitterWidth) * splitRatio_);
+    rightLeft = paneLeft + leftWidth + splitterWidth;
     rightWidth = width - rightLeft - gap;
   }
 
-  MoveWindow(panes_[0].address, paneLeft, contentTop, leftWidth, kAddressHeight,
+  MoveWindow(panes_[0].address, paneLeft, contentTop, leftWidth, addressHeight,
              TRUE);
-  MoveWindow(panes_[0].list, paneLeft, contentTop + kAddressHeight, leftWidth,
-             contentHeight - kAddressHeight, TRUE);
+  MoveWindow(panes_[0].list, paneLeft, contentTop + addressHeight, leftWidth,
+             contentHeight - addressHeight, TRUE);
   ShowWindow(panes_[1].address, twoPanes_ ? SW_SHOW : SW_HIDE);
   ShowWindow(panes_[1].list, twoPanes_ ? SW_SHOW : SW_HIDE);
   if (twoPanes_) {
     MoveWindow(panes_[1].address, rightLeft, contentTop, rightWidth,
-               kAddressHeight, TRUE);
-    MoveWindow(panes_[1].list, rightLeft, contentTop + kAddressHeight,
-               rightWidth, contentHeight - kAddressHeight, TRUE);
+               addressHeight, TRUE);
+    MoveWindow(panes_[1].list, rightLeft, contentTop + addressHeight,
+               rightWidth, contentHeight - addressHeight, TRUE);
   }
-  MoveWindow(status_, gap, height - kStatusHeight + 3,
-             std::max(0, width - gap * 2), kStatusHeight - 3, TRUE);
+  MoveWindow(status_, gap, height - statusHeight + scale(3),
+             std::max(0, width - gap * 2), statusHeight - scale(3), TRUE);
+}
+
+void App::ApplyDpi(UINT dpi) {
+  if (dpi == 0 || dpi == dpi_)
+    return;
+  dpi_ = dpi;
+  HFONT newFont = CreateUiFont(dpi_);
+  if (newFont != nullptr) {
+    for (HWND control : toolbar_) {
+      if (control != nullptr)
+        SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(newFont),
+                     TRUE);
+    }
+    for (HWND control : {searchEdit_, commandSuggestions_, sidebar_, status_,
+                         panes_[0].address, panes_[0].list, panes_[1].address,
+                         panes_[1].list}) {
+      if (control != nullptr)
+        SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(newFont),
+                     TRUE);
+    }
+    if (uiFont_ != nullptr)
+      DeleteObject(uiFont_);
+    uiFont_ = newFont;
+  }
+  const std::array<int, 4> columnWidths{260, 120, 100, 140};
+  for (Pane &pane : panes_) {
+    for (int column = 0; column < static_cast<int>(columnWidths.size());
+         ++column) {
+      ListView_SetColumnWidth(
+          pane.list, column,
+          MulDiv(columnWidths[column], static_cast<int>(dpi_),
+                 USER_DEFAULT_SCREEN_DPI));
+    }
+  }
+}
+
+void App::UpdateActivePaneVisuals() {
+  constexpr COLORREF activeBackground = RGB(246, 250, 255);
+  const COLORREF inactiveBackground = GetSysColor(COLOR_WINDOW);
+  for (int index = 0; index < 2; ++index) {
+    const COLORREF background =
+        index == activePane_ ? activeBackground : inactiveBackground;
+    ListView_SetBkColor(panes_[index].list, background);
+    ListView_SetTextBkColor(panes_[index].list, background);
+    InvalidateRect(panes_[index].list, nullptr, FALSE);
+    InvalidateRect(panes_[index].address, nullptr, TRUE);
+  }
 }
 
 void App::CreateAccelerators() {
@@ -454,7 +668,11 @@ void App::CreateAccelerators() {
                           {FVIRTKEY | FCONTROL, 'R', IdRefresh},
                           {FVIRTKEY | FCONTROL, 'L', IdFocusAddress},
                           {FVIRTKEY | FCONTROL, 'F', IdFocusSearch},
-                          {FVIRTKEY, VK_F6, IdSwitchPane},
+                          {FVIRTKEY, VK_TAB, IdSwitchPane},
+                          {FVIRTKEY, VK_F5, IdCopyToOther},
+                          {FVIRTKEY, VK_F6, IdMoveToOther},
+                          {FVIRTKEY, VK_F7, IdNewFolder},
+                          {FVIRTKEY, VK_BACK, IdUp},
                           {FVIRTKEY | FALT, VK_LEFT, IdBack},
                           {FVIRTKEY | FALT, VK_RIGHT, IdForward},
                           {FVIRTKEY | FALT, VK_UP, IdUp}};
@@ -489,6 +707,31 @@ void App::InitializeFromSettings(const std::wstring &initialPath) {
     Notify(L"指定されたファイルを開けません", true);
 }
 
+void App::VerifySettingsWritable() {
+  const std::filesystem::path settingsPath = settingsStore_.Path();
+  const DWORD attributes = GetFileAttributesW(settingsPath.c_str());
+  if (attributes != INVALID_FILE_ATTRIBUTES &&
+      (attributes & FILE_ATTRIBUTE_READONLY) != 0) {
+    settingsWritable_ = false;
+  } else {
+    std::filesystem::path probe = settingsPath;
+    probe += std::filesystem::path(".write-test-" + MakeStableId());
+    {
+      std::ofstream stream(probe, std::ios::binary | std::ios::trunc);
+      settingsWritable_ = static_cast<bool>(stream);
+    }
+    std::error_code ignored;
+    std::filesystem::remove(probe, ignored);
+  }
+  if (!settingsWritable_) {
+    MessageBoxW(
+        window_,
+        L"SimpleFilerフォルダーへ設定を書き込めません。\n"
+        L"ファイル操作は続けられますが、この起動中の設定変更は保存されません。",
+        L"ポータブル設定", MB_OK | MB_ICONWARNING);
+  }
+}
+
 void App::SaveSettings() {
   WINDOWPLACEMENT placement{};
   placement.length = sizeof(placement);
@@ -508,6 +751,10 @@ void App::SaveSettings() {
     settings_.panes[index].sortColumn = panes_[index].sortColumn;
     settings_.panes[index].sortAscending = panes_[index].sortAscending;
     settings_.panes[index].showHidden = panes_[index].showHidden;
+  }
+  if (!settingsWritable_) {
+    Notify(L"設定フォルダーへ書き込めないため保存しませんでした", true);
+    return;
   }
   std::string error;
   if (!settingsStore_.Save(settings_, &error))
@@ -550,7 +797,7 @@ void App::Navigate(int paneIndex, const std::wstring &inputPath,
   ListView_SetItemCountEx(pane.list, 0, LVSICF_NOSCROLL);
   SetWindowTextW(pane.address, pane.path.c_str());
   if (paneIndex == activePane_)
-    SetWindowTextW(toolbar_[10], L"検索");
+    SetWindowTextW(toolbar_[10], L"実行");
   if (addHistory) {
     if (!pane.history.empty() && pane.historyIndex + 1 < pane.history.size()) {
       pane.history.erase(pane.history.begin() +
@@ -692,6 +939,22 @@ void App::StartSearch(const std::wstring &query) {
 
 void App::SortPane(int paneIndex) {
   Pane &pane = panes_[paneIndex];
+  std::unordered_set<std::wstring> selectedPaths;
+  int selectedIndex = -1;
+  while ((selectedIndex =
+              ListView_GetNextItem(pane.list, selectedIndex, LVNI_SELECTED)) >=
+         0) {
+    if (selectedIndex < static_cast<int>(pane.items.size()))
+      selectedPaths.insert(pane.items[selectedIndex].path);
+  }
+  std::wstring focusedPath;
+  const int focusedIndex =
+      ListView_GetNextItem(pane.list, -1, LVNI_FOCUSED);
+  if (focusedIndex >= 0 &&
+      focusedIndex < static_cast<int>(pane.items.size())) {
+    focusedPath = pane.items[focusedIndex].path;
+  }
+
   const int column = pane.sortColumn;
   const bool ascending = pane.sortAscending;
   std::stable_sort(
@@ -714,7 +977,22 @@ void App::SortPane(int paneIndex) {
         }
         return ascending ? comparison < 0 : comparison > 0;
       });
-  ListView_RedrawItems(pane.list, 0, static_cast<int>(pane.items.size()) - 1);
+  ListView_SetItemState(pane.list, -1, 0, LVIS_SELECTED | LVIS_FOCUSED);
+  for (int index = 0; index < static_cast<int>(pane.items.size()); ++index) {
+    UINT state = 0;
+    if (selectedPaths.contains(pane.items[index].path))
+      state |= LVIS_SELECTED;
+    if (!focusedPath.empty() && pane.items[index].path == focusedPath)
+      state |= LVIS_FOCUSED;
+    if (state != 0) {
+      ListView_SetItemState(pane.list, index, state,
+                            LVIS_SELECTED | LVIS_FOCUSED);
+    }
+  }
+  if (!pane.items.empty()) {
+    ListView_RedrawItems(pane.list, 0,
+                         static_cast<int>(pane.items.size()) - 1);
+  }
 }
 
 void App::RetireWorker(Pane &pane) {
@@ -779,9 +1057,32 @@ void App::CopySelection(bool cut) {
   }
 }
 
+void App::TransferSelectionToOtherPane(bool move) {
+  if (!twoPanes_) {
+    Notify(L"反対側のペインが表示されていません", true);
+    return;
+  }
+  const auto paths = SelectedPaths();
+  if (paths.empty())
+    return;
+  const Pane &destinationPane = panes_[1 - activePane_];
+  const std::wstring destination =
+      destinationPane.searchMode ? destinationPane.searchRoot
+                                 : destinationPane.path;
+  if (destination.empty()) {
+    Notify(L"反対ペインのコピー先フォルダーがありません", true);
+    return;
+  }
+  ++pendingFileOperations_;
+  TransferFilesAsync(window_, paths, destination, move);
+  Notify(move ? L"反対ペインへの移動を開始しました"
+              : L"反対ペインへのコピーを開始しました");
+}
+
 void App::Paste() {
   const Pane &pane = panes_[activePane_];
   if (!pane.path.empty()) {
+    ++pendingFileOperations_;
     PasteFilesAsync(window_, pane.searchMode ? pane.searchRoot : pane.path);
     Notify(L"ファイル操作を開始しました");
   }
@@ -791,13 +1092,7 @@ void App::DeleteSelection(bool permanent) {
   auto paths = SelectedPaths();
   if (paths.empty())
     return;
-  if (permanent &&
-      MessageBoxW(window_,
-                  L"選択項目を完全に削除します。元に戻せません。続行しますか？",
-                  L"SimpleFiler",
-                  MB_ICONWARNING | MB_YESNO | MB_DEFBUTTON2) != IDYES) {
-    return;
-  }
+  ++pendingFileOperations_;
   DeleteFilesAsync(window_, std::move(paths), permanent);
   Notify(L"削除処理を開始しました");
 }
@@ -814,6 +1109,7 @@ void App::NewFolder() {
     Notify(L"フォルダー名に使用できない文字があります", true);
     return;
   }
+  ++pendingFileOperations_;
   CreateFolderAsync(window_, pane.searchMode ? pane.searchRoot : pane.path,
                     name);
   Notify(L"フォルダーを作成中です");
@@ -834,8 +1130,13 @@ void App::AddCurrentBookmark() {
       PromptText(L"ブックマーク追加", L"表示名", LeafName(path));
   if (name.empty())
     return;
+  const std::wstring alias =
+      PromptText(L"ブックマーク追加", L"ffのエイリアス（省略可）");
+  const std::wstring keywords = PromptText(
+      L"ブックマーク追加", L"検索キーワード（空白区切り、省略可）");
   settings_.bookmarks.push_back(
-      {MakeStableId(), WideToUtf8(name), WideToUtf8(path)});
+      {MakeStableId(), WideToUtf8(name), WideToUtf8(path), WideToUtf8(alias),
+       SplitKeywords(keywords)});
   RebuildSidebar();
   SaveSettings();
 }
@@ -867,10 +1168,23 @@ void App::AddLink(bool application) {
         PromptText(L"アプリリンク", L"作業フォルダー（省略可）",
                    std::filesystem::path(file.data()).parent_path().wstring());
   }
+  const std::wstring alias = PromptText(
+      L"リンク追加",
+      application ? L"aaのエイリアス（省略可）"
+                  : L"エイリアス（省略可）");
+  const std::wstring keywords = PromptText(
+      L"リンク追加", L"検索キーワード（空白区切り、省略可）");
+  const bool runAsAdministrator =
+      application &&
+      MessageBoxW(window_, L"通常の起動を管理者権限にしますか？",
+                  L"アプリリンク", MB_ICONQUESTION | MB_YESNO |
+                                        MB_DEFBUTTON2) == IDYES;
   settings_.links.push_back(
       {MakeStableId(), application ? LinkType::Application : LinkType::File,
-       WideToUtf8(name), WideToUtf8(file.data()), WideToUtf8(arguments),
-       WideToUtf8(workingDirectory)});
+       WideToUtf8(name), WideToUtf8(MakeAppPath(file.data())),
+       WideToUtf8(arguments),
+       WideToUtf8(MakeAppPath(workingDirectory)), WideToUtf8(alias),
+       SplitKeywords(keywords), runAsAdministrator});
   RebuildSidebar();
   SaveSettings();
 }
@@ -889,7 +1203,8 @@ void App::RebuildSidebar() {
   }
   for (std::size_t index = 0; index < settings_.links.size(); ++index) {
     const RegisteredLink &link = settings_.links[index];
-    const std::wstring target = Utf8ToWide(link.target);
+    const std::wstring target =
+        ResolveAppPath(Utf8ToWide(link.target));
     const std::wstring prefix =
         GetFileAttributesW(ToExtendedPath(target).c_str()) !=
                 INVALID_FILE_ATTRIBUTES
@@ -913,19 +1228,100 @@ void App::ActivateSidebarItem(bool administrator) {
     return;
   }
   const RegisteredLink &link = settings_.links[index];
-  const std::wstring target = Utf8ToWide(link.target);
+  if (link.type == LinkType::Application) {
+    LaunchRegisteredApplication(index, administrator, true);
+    return;
+  }
+  const std::wstring target = ResolveAppPath(Utf8ToWide(link.target));
   if (GetFileAttributesW(ToExtendedPath(target).c_str()) ==
       INVALID_FILE_ATTRIBUTES) {
     Notify(L"登録先が見つかりません: " + target, true);
     return;
   }
   if (!OpenPath(window_, target, Utf8ToWide(link.arguments),
-                Utf8ToWide(link.workingDirectory),
-                administrator && link.type == LinkType::Application)) {
+                ResolveAppPath(Utf8ToWide(link.workingDirectory)))) {
     const DWORD error = GetLastError();
     if (error != ERROR_CANCELLED)
       Notify(L"リンク先を開けません: " + WindowsErrorMessage(error), true);
   }
+}
+
+void App::EditSidebarItem() {
+  const int selected =
+      static_cast<int>(SendMessageW(sidebar_, LB_GETCURSEL, 0, 0));
+  if (selected < 0 || selected >= static_cast<int>(sidebarMap_.size()))
+    return;
+
+  const auto [bookmarkEntry, index] = sidebarMap_[selected];
+  if (bookmarkEntry) {
+    Bookmark &bookmark = settings_.bookmarks[index];
+    const std::wstring name = PromptText(
+        L"フォルダー登録を編集", L"表示名", Utf8ToWide(bookmark.name));
+    if (name.empty())
+      return;
+    const std::wstring path = PromptText(
+        L"フォルダー登録を編集", L"フォルダーパス",
+        Utf8ToWide(bookmark.path));
+    if (path.empty())
+      return;
+    const std::wstring alias = PromptText(
+        L"フォルダー登録を編集", L"ffのエイリアス（省略可）",
+        Utf8ToWide(bookmark.alias));
+    const std::wstring keywords = PromptText(
+        L"フォルダー登録を編集", L"検索キーワード（空白区切り）",
+        JoinKeywords(bookmark.keywords));
+    bookmark.name = WideToUtf8(name);
+    bookmark.path = WideToUtf8(path);
+    bookmark.alias = WideToUtf8(alias);
+    bookmark.keywords = SplitKeywords(keywords);
+  } else {
+    RegisteredLink &link = settings_.links[index];
+    const std::wstring name = PromptText(
+        L"リンク登録を編集", L"表示名", Utf8ToWide(link.name));
+    if (name.empty())
+      return;
+    const std::wstring target = PromptText(
+        L"リンク登録を編集", L"対象パス", Utf8ToWide(link.target));
+    if (target.empty())
+      return;
+    std::wstring arguments = Utf8ToWide(link.arguments);
+    std::wstring workingDirectory = Utf8ToWide(link.workingDirectory);
+    if (link.type == LinkType::Application) {
+      arguments = PromptText(L"アプリ登録を編集", L"引数テンプレート",
+                             arguments);
+      workingDirectory = PromptText(L"アプリ登録を編集",
+                                    L"作業フォルダー（省略可）",
+                                    workingDirectory);
+    }
+    const std::wstring alias = PromptText(
+        L"リンク登録を編集",
+        link.type == LinkType::Application ? L"aaのエイリアス（省略可）"
+                                           : L"エイリアス（省略可）",
+        Utf8ToWide(link.alias));
+    const std::wstring keywords = PromptText(
+        L"リンク登録を編集", L"検索キーワード（空白区切り）",
+        JoinKeywords(link.keywords));
+    bool runAsAdministrator = link.runAsAdministrator;
+    if (link.type == LinkType::Application) {
+      runAsAdministrator =
+          MessageBoxW(window_, L"通常の起動を管理者権限にしますか？",
+                      L"アプリ登録を編集",
+                      MB_ICONQUESTION | MB_YESNO |
+                          (link.runAsAdministrator ? MB_DEFBUTTON1
+                                                   : MB_DEFBUTTON2)) == IDYES;
+    }
+    link.name = WideToUtf8(name);
+    link.target = WideToUtf8(MakeAppPath(target));
+    link.arguments = WideToUtf8(arguments);
+    link.workingDirectory =
+        WideToUtf8(MakeAppPath(workingDirectory));
+    link.alias = WideToUtf8(alias);
+    link.keywords = SplitKeywords(keywords);
+    link.runAsAdministrator = runAsAdministrator;
+  }
+  RebuildSidebar();
+  SaveSettings();
+  SendMessageW(sidebar_, LB_SETCURSEL, selected, 0);
 }
 
 void App::RemoveSidebarItem() {
@@ -975,6 +1371,262 @@ void App::LaunchSelectedTerminal(TerminalKind kind, bool administrator) {
     return;
   }
   Notify(L"端末を起動できません: " + WindowsErrorMessage(result.error), true);
+}
+
+void App::RebuildCommandSuggestions() {
+  const CommandQuery command =
+      ParseCommandQuery(GetWindowTextString(searchEdit_));
+  SendMessageW(commandSuggestions_, LB_RESETCONTENT, 0, 0);
+  commandSuggestionItems_.clear();
+  if (command.mode == CommandMode::None) {
+    ShowWindow(commandSuggestions_, SW_HIDE);
+    return;
+  }
+
+  const auto bestScore = [&command](std::initializer_list<std::wstring> values)
+      -> std::optional<int> {
+    std::optional<int> best;
+    for (const std::wstring &value : values) {
+      const std::optional<int> score = CommandMatchScore(command.query, value);
+      if (score && (!best || *score > *best))
+        best = score;
+    }
+    return best;
+  };
+
+  if (command.mode == CommandMode::Folder) {
+    for (std::size_t index = 0; index < settings_.bookmarks.size(); ++index) {
+      const Bookmark &bookmark = settings_.bookmarks[index];
+      const std::wstring name = Utf8ToWide(bookmark.name);
+      const std::wstring path = Utf8ToWide(bookmark.path);
+      const std::wstring alias = Utf8ToWide(bookmark.alias);
+      std::optional<int> score = bestScore({name, path, alias});
+      for (const std::string &keyword : bookmark.keywords) {
+        const std::optional<int> keywordScore =
+            CommandMatchScore(command.query, Utf8ToWide(keyword));
+        if (keywordScore && (!score || *keywordScore > *score))
+          score = keywordScore;
+      }
+      if (score) {
+        const std::wstring label =
+            alias.empty() ? name : name + L" [" + alias + L"]";
+        commandSuggestionItems_.push_back(
+            {CommandSuggestionKind::Folder, index, false, *score, label,
+             path});
+      }
+    }
+  } else if (command.mode == CommandMode::Application) {
+    for (std::size_t index = 0; index < settings_.links.size(); ++index) {
+      const RegisteredLink &link = settings_.links[index];
+      if (link.type != LinkType::Application)
+        continue;
+      const std::wstring name = Utf8ToWide(link.name);
+      const std::wstring target =
+          ResolveAppPath(Utf8ToWide(link.target));
+      const std::wstring alias = Utf8ToWide(link.alias);
+      std::optional<int> score = bestScore({name, target, alias});
+      for (const std::string &keyword : link.keywords) {
+        const std::optional<int> keywordScore =
+            CommandMatchScore(command.query, Utf8ToWide(keyword));
+        if (keywordScore && (!score || *keywordScore > *score))
+          score = keywordScore;
+      }
+      if (score) {
+        const std::wstring label =
+            alias.empty() ? name : name + L" [" + alias + L"]";
+        commandSuggestionItems_.push_back({CommandSuggestionKind::Application,
+                                           index, false, *score, label,
+                                           target});
+      }
+    }
+  } else if (command.mode == CommandMode::Terminal) {
+    const Pane &pane = panes_[activePane_];
+    const std::wstring directory =
+        pane.searchMode ? pane.searchRoot : pane.path;
+    for (const auto &[administrator, terms, label] :
+         std::array<std::tuple<bool, std::wstring, std::wstring>, 2>{
+             {{false, L"通常 normal", L"CMDをここで開く"},
+              {true, L"admin 管理者", L"管理者CMDをここで開く"}}}) {
+      const std::optional<int> score = bestScore({terms, label});
+      if (score) {
+        commandSuggestionItems_.push_back(
+            {CommandSuggestionKind::Terminal, 0, administrator, *score, label,
+             directory});
+      }
+    }
+  }
+
+  std::stable_sort(commandSuggestionItems_.begin(),
+                   commandSuggestionItems_.end(),
+                   [](const CommandSuggestion &left,
+                      const CommandSuggestion &right) {
+                     if (left.score != right.score)
+                       return left.score > right.score;
+                     return left.label < right.label;
+                   });
+  for (const CommandSuggestion &suggestion : commandSuggestionItems_) {
+    const std::wstring text = suggestion.detail.empty()
+                                  ? suggestion.label
+                                  : suggestion.label + L"    " +
+                                        suggestion.detail;
+    SendMessageW(commandSuggestions_, LB_ADDSTRING, 0,
+                 reinterpret_cast<LPARAM>(text.c_str()));
+  }
+  if (commandSuggestionItems_.empty()) {
+    ShowWindow(commandSuggestions_, SW_HIDE);
+    Notify(L"一致する候補がありません");
+    return;
+  }
+  SendMessageW(commandSuggestions_, LB_SETCURSEL, 0, 0);
+  SetWindowPos(commandSuggestions_, HWND_TOP, 0, 0, 0, 0,
+               SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+}
+
+void App::MoveCommandSelection(int delta) {
+  if (!IsWindowVisible(commandSuggestions_) ||
+      commandSuggestionItems_.empty()) {
+    return;
+  }
+  int selected =
+      static_cast<int>(SendMessageW(commandSuggestions_, LB_GETCURSEL, 0, 0));
+  if (selected < 0)
+    selected = 0;
+  selected = std::clamp(selected + delta, 0,
+                        static_cast<int>(commandSuggestionItems_.size()) - 1);
+  SendMessageW(commandSuggestions_, LB_SETCURSEL, selected, 0);
+}
+
+void App::AcceptCommandSuggestion(bool control, bool shift) {
+  if (!IsWindowVisible(commandSuggestions_)) {
+    if (ParseCommandQuery(GetWindowTextString(searchEdit_)).mode !=
+        CommandMode::None) {
+      Notify(L"実行できる候補がありません", true);
+      return;
+    }
+    StartSearch(GetWindowTextString(searchEdit_));
+    return;
+  }
+  const int selected =
+      static_cast<int>(SendMessageW(commandSuggestions_, LB_GETCURSEL, 0, 0));
+  if (selected < 0 ||
+      selected >= static_cast<int>(commandSuggestionItems_.size())) {
+    return;
+  }
+  const CommandSuggestion suggestion = commandSuggestionItems_[selected];
+  DismissCommandSuggestions(true);
+
+  switch (suggestion.kind) {
+  case CommandSuggestionKind::Folder:
+    if (suggestion.sourceIndex < settings_.bookmarks.size()) {
+      const int pane = shift && twoPanes_ ? 1 - activePane_ : activePane_;
+      Navigate(pane,
+               Utf8ToWide(settings_.bookmarks[suggestion.sourceIndex].path));
+      activePane_ = pane;
+      UpdateActivePaneVisuals();
+      SetFocus(panes_[activePane_].list);
+    }
+    break;
+  case CommandSuggestionKind::Application:
+    LaunchRegisteredApplication(suggestion.sourceIndex, control, !shift);
+    break;
+  case CommandSuggestionKind::Terminal:
+    LaunchSelectedTerminal(TerminalKind::CommandPrompt,
+                           suggestion.administrator);
+    break;
+  }
+}
+
+void App::DismissCommandSuggestions(bool clearInput) {
+  ShowWindow(commandSuggestions_, SW_HIDE);
+  commandSuggestionItems_.clear();
+  if (clearInput)
+    SetWindowTextW(searchEdit_, L"");
+  SetFocus(panes_[activePane_].list);
+}
+
+void App::BeginCommandInput(wchar_t character) {
+  const wchar_t text[] = {character, L'\0'};
+  SetWindowTextW(searchEdit_, text);
+  SetFocus(searchEdit_);
+  SendMessageW(searchEdit_, EM_SETSEL, 1, 1);
+}
+
+void App::AddCommandRegistration() {
+  const CommandMode mode =
+      ParseCommandQuery(GetWindowTextString(searchEdit_)).mode;
+  ShowWindow(commandSuggestions_, SW_HIDE);
+  if (mode == CommandMode::Folder) {
+    AddCurrentBookmark();
+  } else if (mode == CommandMode::Application) {
+    AddLink(true);
+  } else {
+    Notify(L"ffまたはaaを入力してから登録してください", true);
+    return;
+  }
+  SetFocus(searchEdit_);
+  RebuildCommandSuggestions();
+}
+
+void App::LaunchRegisteredApplication(std::size_t index, bool administrator,
+                                      bool passSelection) {
+  if (index >= settings_.links.size() ||
+      settings_.links[index].type != LinkType::Application) {
+    return;
+  }
+  const RegisteredLink &link = settings_.links[index];
+  const std::wstring target = ResolveAppPath(Utf8ToWide(link.target));
+  if (GetFileAttributesW(ToExtendedPath(target).c_str()) ==
+      INVALID_FILE_ATTRIBUTES) {
+    Notify(L"登録アプリが見つかりません: " + target, true);
+    return;
+  }
+
+  const Pane &pane = panes_[activePane_];
+  const auto paneFolder = [](const Pane &value) {
+    return value.searchMode ? value.searchRoot : value.path;
+  };
+  AppArgumentContext context;
+  if (passSelection)
+    context.files = SelectedPaths();
+  context.folder = paneFolder(pane);
+  context.left = paneFolder(panes_[0]);
+  context.right = paneFolder(panes_[1]);
+  context.other = paneFolder(panes_[1 - activePane_]);
+
+  std::wstring arguments;
+  const std::wstring argumentTemplate = Utf8ToWide(link.arguments);
+  if (!argumentTemplate.empty()) {
+    const AppArgumentExpansion expansion =
+        ExpandAppArgumentTemplate(argumentTemplate, context);
+    if (!expansion) {
+      Notify(L"アプリ引数を作成できません: " + expansion.error, true);
+      return;
+    }
+    arguments = expansion.commandLine;
+  } else if (passSelection) {
+    if (context.files.empty()) {
+      arguments = QuoteWindowsCommandLineArgument(context.folder);
+    } else {
+      for (const std::wstring &path : context.files) {
+        if (!arguments.empty())
+          arguments.push_back(L' ');
+        arguments += QuoteWindowsCommandLineArgument(path);
+      }
+    }
+  }
+
+  std::wstring workingDirectory =
+      ResolveAppPath(Utf8ToWide(link.workingDirectory));
+  if (workingDirectory.empty())
+    workingDirectory = context.folder;
+  if (!OpenPath(window_, target, arguments, workingDirectory,
+                administrator || link.runAsAdministrator)) {
+    const DWORD error = GetLastError();
+    if (error != ERROR_CANCELLED) {
+      Notify(L"登録アプリを起動できません: " + WindowsErrorMessage(error),
+             true);
+    }
+  }
 }
 
 void App::ShowLinkMenu(HWND sourceButton) {
@@ -1049,6 +1701,7 @@ void App::CreateZipFromSelection() {
       Notify(L"選択したファイル自身をZIP出力先にはできません", true);
       return;
     }
+    ++pendingZipOperations_;
     CreateZipAsync(window_, paths, output.data());
     Notify(L"ZIPを作成中です");
   }
@@ -1061,6 +1714,7 @@ void App::ExtractSelectedZip() {
   const std::wstring destination = PickFolder(window_, L"展開先を選択");
   if (destination.empty())
     return;
+  ++pendingZipOperations_;
   ExtractZipAsync(window_, paths.front(), destination);
   Notify(L"ZIPを展開中です");
 }
@@ -1077,14 +1731,21 @@ std::wstring App::PromptText(const std::wstring &title,
                              const std::wstring &label,
                              const std::wstring &initial) const {
   PromptState state{label, initial};
+  state.font = uiFont_;
+  state.dpi = dpi_;
   RECT owner{};
   GetWindowRect(window_, &owner);
+  const int promptWidth =
+      MulDiv(430, static_cast<int>(dpi_), USER_DEFAULT_SCREEN_DPI);
+  const int promptHeight =
+      MulDiv(140, static_cast<int>(dpi_), USER_DEFAULT_SCREEN_DPI);
   HWND prompt =
       CreateWindowExW(WS_EX_DLGMODALFRAME, kPromptClass, title.c_str(),
                       WS_POPUP | WS_CAPTION | WS_SYSMENU,
-                      owner.left + (owner.right - owner.left - 430) / 2,
-                      owner.top + (owner.bottom - owner.top - 140) / 2, 430,
-                      140, window_, nullptr, instance_, &state);
+                      owner.left + (owner.right - owner.left - promptWidth) / 2,
+                      owner.top + (owner.bottom - owner.top - promptHeight) / 2,
+                      promptWidth, promptHeight, window_, nullptr, instance_,
+                      &state);
   if (prompt == nullptr)
     return {};
   EnableWindow(window_, FALSE);
@@ -1122,20 +1783,49 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
   switch (message) {
   case WM_GETMINMAXINFO: {
     auto *limits = reinterpret_cast<MINMAXINFO *>(lParam);
-    limits->ptMinTrackSize.x = 760;
-    limits->ptMinTrackSize.y = 480;
+    limits->ptMinTrackSize.x =
+        MulDiv(760, static_cast<int>(dpi_), USER_DEFAULT_SCREEN_DPI);
+    limits->ptMinTrackSize.y =
+        MulDiv(480, static_cast<int>(dpi_), USER_DEFAULT_SCREEN_DPI);
+    return 0;
+  }
+  case WM_DPICHANGED: {
+    const auto *suggested = reinterpret_cast<const RECT *>(lParam);
+    SetWindowPos(window_, nullptr, suggested->left, suggested->top,
+                 suggested->right - suggested->left,
+                 suggested->bottom - suggested->top,
+                 SWP_NOACTIVATE | SWP_NOZORDER);
+    ApplyDpi(HIWORD(wParam));
+    RECT client{};
+    GetClientRect(window_, &client);
+    LayoutControls(client.right, client.bottom);
     return 0;
   }
   case WM_SIZE:
     LayoutControls(LOWORD(lParam), HIWORD(lParam));
     return 0;
+  case WM_CTLCOLOREDIT: {
+    const HWND control = reinterpret_cast<HWND>(lParam);
+    const int paneIndex = PaneIndexFromControl(control);
+    if (control == panes_[paneIndex].address) {
+      const bool active = paneIndex == activePane_;
+      SetBkColor(reinterpret_cast<HDC>(wParam),
+                 active ? RGB(238, 246, 255) : GetSysColor(COLOR_WINDOW));
+      return reinterpret_cast<LRESULT>(
+          active ? activePaneBrush_ : GetSysColorBrush(COLOR_WINDOW));
+    }
+    break;
+  }
   case WM_LBUTTONDOWN: {
     if (twoPanes_) {
+      const int splitterWidth =
+          MulDiv(kSplitterWidth, static_cast<int>(dpi_),
+                 USER_DEFAULT_SCREEN_DPI);
       RECT left{};
       GetWindowRect(panes_[0].list, &left);
-      POINT split{left.right + kSplitterWidth / 2, GET_Y_LPARAM(lParam)};
+      POINT split{left.right + splitterWidth / 2, GET_Y_LPARAM(lParam)};
       ScreenToClient(window_, &split);
-      if (abs(GET_X_LPARAM(lParam) - split.x) <= kSplitterWidth) {
+      if (abs(GET_X_LPARAM(lParam) - split.x) <= splitterWidth) {
         draggingSplitter_ = true;
         SetCapture(window_);
       }
@@ -1146,11 +1836,20 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
     if (draggingSplitter_) {
       RECT client{};
       GetClientRect(window_, &client);
+      const int sidebarBase =
+          MulDiv(kSidebarWidth, static_cast<int>(dpi_),
+                 USER_DEFAULT_SCREEN_DPI);
+      const int splitterWidth =
+          MulDiv(kSplitterWidth, static_cast<int>(dpi_),
+                 USER_DEFAULT_SCREEN_DPI);
+      const int margins =
+          MulDiv(8, static_cast<int>(dpi_), USER_DEFAULT_SCREEN_DPI);
       const int sidebarWidth =
           sidebarVisible_
-              ? std::min(kSidebarWidth, static_cast<int>(client.right / 3))
+              ? std::min(sidebarBase, static_cast<int>(client.right / 3))
               : 0;
-      const int available = client.right - sidebarWidth - kSplitterWidth - 8;
+      const int available =
+          client.right - sidebarWidth - splitterWidth - margins;
       if (available > 0) {
         splitRatio_ = std::clamp(
             static_cast<double>(GET_X_LPARAM(lParam) - sidebarWidth) /
@@ -1168,6 +1867,9 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
     return 0;
   case WM_SETCURSOR:
     if (twoPanes_ && LOWORD(lParam) == HTCLIENT) {
+      const int splitterWidth =
+          MulDiv(kSplitterWidth, static_cast<int>(dpi_),
+                 USER_DEFAULT_SCREEN_DPI);
       POINT point{};
       GetCursorPos(&point);
       ScreenToClient(window_, &point);
@@ -1175,7 +1877,7 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
       GetWindowRect(panes_[0].list, &left);
       POINT split{left.right, 0};
       ScreenToClient(window_, &split);
-      if (abs(point.x - split.x) <= kSplitterWidth) {
+      if (abs(point.x - split.x) <= splitterWidth) {
         SetCursor(LoadCursorW(nullptr, IDC_SIZEWE));
         return TRUE;
       }
@@ -1187,9 +1889,21 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
       ActivateSidebarItem();
       return 0;
     }
+    if (HIWORD(wParam) == LBN_DBLCLK &&
+        command == IdCommandSuggestions) {
+      AcceptCommandSuggestion(false, false);
+      return 0;
+    }
+    if (HIWORD(wParam) == EN_CHANGE && command == IdSearchEdit) {
+      RebuildCommandSuggestions();
+      return 0;
+    }
     if (HIWORD(wParam) == EN_SETFOCUS &&
         (command == IdLeftAddress || command == IdRightAddress)) {
+      ShowWindow(commandSuggestions_, SW_HIDE);
+      commandSuggestionItems_.clear();
       activePane_ = command == IdLeftAddress ? 0 : 1;
+      UpdateActivePaneVisuals();
     }
     switch (command) {
     case IdBack:
@@ -1211,6 +1925,7 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
       twoPanes_ = !twoPanes_;
       if (!twoPanes_ && activePane_ == 1)
         activePane_ = 0;
+      UpdateActivePaneVisuals();
       RECT client{};
       GetClientRect(window_, &client);
       LayoutControls(client.right, client.bottom);
@@ -1251,11 +1966,17 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
       LaunchSelectedTerminal(TerminalKind::PowerShell, true);
       break;
     case IdSearch:
-      if (panes_[activePane_].searchMode && panes_[activePane_].busy) {
+      if (ParseCommandQuery(GetWindowTextString(searchEdit_)).mode !=
+          CommandMode::None) {
+        AcceptCommandSuggestion(
+            (GetKeyState(VK_CONTROL) & 0x8000) != 0,
+            (GetKeyState(VK_SHIFT) & 0x8000) != 0);
+      } else if (panes_[activePane_].searchMode &&
+                 panes_[activePane_].busy) {
         RetireWorker(panes_[activePane_]);
         ++panes_[activePane_].generation;
         panes_[activePane_].busy = false;
-        SetWindowTextW(toolbar_[10], L"検索");
+        SetWindowTextW(toolbar_[10], L"実行");
         Notify(L"検索を中止しました");
       } else {
         StartSearch(GetWindowTextString(searchEdit_));
@@ -1269,6 +1990,12 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
       break;
     case IdPaste:
       Paste();
+      break;
+    case IdCopyToOther:
+      TransferSelectionToOtherPane(false);
+      break;
+    case IdMoveToOther:
+      TransferSelectionToOtherPane(true);
       break;
     case IdDelete:
       DeleteSelection(false);
@@ -1309,6 +2036,7 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
     case IdSwitchPane:
       if (twoPanes_) {
         activePane_ = 1 - activePane_;
+        UpdateActivePaneVisuals();
         SetWindowTextW(searchEdit_,
                        panes_[activePane_].searchMode
                            ? panes_[activePane_].searchQuery.c_str()
@@ -1316,12 +2044,15 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
         SetWindowTextW(toolbar_[10], panes_[activePane_].searchMode &&
                                              panes_[activePane_].busy
                                          ? L"中止"
-                                         : L"検索");
+                                         : L"実行");
         SetFocus(panes_[activePane_].list);
       }
       break;
     case IdRemoveSidebar:
       RemoveSidebarItem();
+      break;
+    case IdEditSidebar:
+      EditSidebarItem();
       break;
     case IdOpenSidebar:
       ActivateSidebarItem(false);
@@ -1338,6 +2069,7 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
     if (header->hwndFrom == panes_[paneIndex].list) {
       if (header->code == NM_SETFOCUS) {
         activePane_ = paneIndex;
+        UpdateActivePaneVisuals();
         SetWindowTextW(searchEdit_,
                        panes_[activePane_].searchMode
                            ? panes_[activePane_].searchQuery.c_str()
@@ -1345,13 +2077,15 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
         SetWindowTextW(toolbar_[10], panes_[activePane_].searchMode &&
                                              panes_[activePane_].busy
                                          ? L"中止"
-                                         : L"検索");
+                                         : L"実行");
         Notify(paneIndex == 0 ? L"左ペイン" : L"右ペイン");
       } else if (header->code == NM_DBLCLK) {
         activePane_ = paneIndex;
+        UpdateActivePaneVisuals();
         OpenSelected();
       } else if (header->code == NM_RCLICK) {
         activePane_ = paneIndex;
+        UpdateActivePaneVisuals();
         POINT point{};
         GetCursorPos(&point);
         ShowFileMenu(point);
@@ -1359,6 +2093,7 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
         const auto *key = reinterpret_cast<NMLVKEYDOWN *>(lParam);
         if (key->wVKey == VK_RETURN) {
           activePane_ = paneIndex;
+          UpdateActivePaneVisuals();
           OpenSelected();
         }
       } else if (header->code == LVN_COLUMNCLICK) {
@@ -1411,6 +2146,7 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
           const std::wstring name = edit->item.pszText;
           if (!name.empty() &&
               name.find_first_of(L"\\/:*?\"<>|") == std::wstring::npos) {
+            ++pendingFileOperations_;
             RenameFileAsync(window_, pane.items[edit->item.iItem].path, name);
             return TRUE;
           }
@@ -1434,6 +2170,7 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
       AppendMenuW(menu, MF_STRING | (canRunAsAdmin ? 0 : MF_GRAYED),
                   IdOpenSidebarAdmin, L"管理者として実行");
       AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+      AppendMenuW(menu, MF_STRING, IdEditSidebar, L"登録を編集");
       AppendMenuW(menu, MF_STRING, IdRemoveSidebar, L"登録を削除");
       TrackPopupMenu(menu, TPM_RIGHTBUTTON, GET_X_LPARAM(lParam),
                      GET_Y_LPARAM(lParam), 0, window_, nullptr);
@@ -1441,9 +2178,25 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
       return 0;
     }
     break;
+  case kMessageCommandType:
+    BeginCommandInput(static_cast<wchar_t>(wParam));
+    return 0;
+  case kMessageCommandAccept:
+    AcceptCommandSuggestion((wParam & 1U) != 0, (wParam & 2U) != 0);
+    return 0;
+  case kMessageCommandMove:
+    MoveCommandSelection(static_cast<int>(static_cast<INT_PTR>(lParam)));
+    return 0;
+  case kMessageCommandDismiss:
+    DismissCommandSuggestions(true);
+    return 0;
+  case kMessageCommandNew:
+    AddCommandRegistration();
+    return 0;
   case kMessageNavigateAddress: {
     const int paneIndex = static_cast<int>(wParam);
     activePane_ = paneIndex;
+    UpdateActivePaneVisuals();
     const std::wstring text = GetWindowTextString(panes_[paneIndex].address);
     if (_wcsicmp(text.c_str(), L"PC") == 0)
       ShowDrives(paneIndex);
@@ -1480,7 +2233,7 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
         done->generation == panes_[done->pane].generation) {
       panes_[done->pane].busy = false;
       if (done->pane == activePane_)
-        SetWindowTextW(toolbar_[10], L"検索");
+        SetWindowTextW(toolbar_[10], L"実行");
       SortPane(done->pane);
       if (done->error == ERROR_SUCCESS) {
         Notify(std::format(L"{} 項目", done->itemCount));
@@ -1494,6 +2247,8 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
   case kMessageOperationDone: {
     std::unique_ptr<OperationResult> result(
         reinterpret_cast<OperationResult *>(lParam));
+    if (pendingFileOperations_ > 0)
+      --pendingFileOperations_;
     if (result->aborted)
       Notify(L"ファイル操作をキャンセルしました");
     else if (FAILED(result->result)) {
@@ -1509,6 +2264,8 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
   }
   case kMessageZipDone: {
     std::unique_ptr<ZipResult> result(reinterpret_cast<ZipResult *>(lParam));
+    if (pendingZipOperations_ > 0)
+      --pendingZipOperations_;
     if (result->success) {
       Notify(result->message);
       RefreshPane(activePane_);
@@ -1518,6 +2275,17 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
     return 0;
   }
   case WM_CLOSE:
+    if (pendingFileOperations_ + pendingZipOperations_ > 0) {
+      const std::wstring closeWarning =
+          std::format(L"ファイル処理が {} 件進行中です。\n"
+                      L"終了すると処理が途中で止まる可能性があります。\n\n"
+                      L"それでも終了しますか？",
+                      pendingFileOperations_ + pendingZipOperations_);
+      if (MessageBoxW(window_, closeWarning.c_str(), L"SimpleFiler を終了",
+                      MB_ICONWARNING | MB_YESNO | MB_DEFBUTTON2) != IDYES) {
+        return 0;
+      }
+    }
     SaveSettings();
     DestroyWindow(window_);
     return 0;
