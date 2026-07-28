@@ -73,7 +73,8 @@ enum ControlId : int {
   IdCmd,
   IdCmdAdmin,
   IdPowerShell,
-  IdPowerShellAdmin
+  IdPowerShellAdmin,
+  IdPromptEdit = 400
 };
 
 struct PromptState final {
@@ -101,7 +102,7 @@ LRESULT CALLBACK PromptProcedure(HWND window, UINT message, WPARAM wParam,
     state->edit = CreateWindowExW(
         WS_EX_CLIENTEDGE, L"EDIT", state->value.c_str(),
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL, 12, 36, 396, 25,
-        window, reinterpret_cast<HMENU>(1), nullptr, nullptr);
+        window, reinterpret_cast<HMENU>(IdPromptEdit), nullptr, nullptr);
     HWND ok = CreateWindowExW(
         0, L"BUTTON", L"OK",
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON, 236, 72, 82, 27,
