@@ -162,6 +162,8 @@ private:
   SettingsStore settingsStore_;
   IContextMenu2 *activeBackgroundMenu2_ = nullptr;
   IContextMenu3 *activeBackgroundMenu3_ = nullptr;
+  std::wstring cachedBackgroundMenuFolder_;
+  IContextMenu *cachedBackgroundMenu_ = nullptr;
 };
 
 } // namespace sf::win

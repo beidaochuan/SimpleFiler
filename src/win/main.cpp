@@ -23,8 +23,11 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
   if (arguments != nullptr)
     LocalFree(arguments);
 
-  sf::win::App app(instance);
-  const int result = app.Run(showCommand, initialPath);
+  int result = 0;
+  {
+    sf::win::App app(instance);
+    result = app.Run(showCommand, initialPath);
+  }
   if (SUCCEEDED(initialized))
     CoUninitialize();
   return result;

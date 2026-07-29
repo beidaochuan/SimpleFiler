@@ -341,6 +341,11 @@ public:
   T *Get() const { return ptr_; }
   T *operator->() const { return ptr_; }
   explicit operator bool() const { return ptr_ != nullptr; }
+  T *Detach() {
+    T *detached = ptr_;
+    ptr_ = nullptr;
+    return detached;
+  }
 
 private:
   T *ptr_ = nullptr;
@@ -364,6 +369,8 @@ App::App(HINSTANCE instance)
       settingsStore_(ExecutablePath().parent_path() / L"simplefiler.json") {}
 
 App::~App() {
+  if (cachedBackgroundMenu_ != nullptr)
+    cachedBackgroundMenu_->Release();
   for (Pane &pane : panes_) {
     if (pane.worker)
       pane.worker->request_stop();
@@ -1739,26 +1746,40 @@ void App::AppendFallbackBackgroundMenu(POINT screenPoint) {
 
 void App::ShowBackgroundShellMenu(const std::wstring &folderPath,
                                   POINT screenPoint) {
-  PIDLIST_ABSOLUTE pidl = nullptr;
-  if (FAILED(SHParseDisplayName(folderPath.c_str(), nullptr, &pidl, 0,
-                                nullptr)) ||
-      pidl == nullptr) {
-    AppendFallbackBackgroundMenu(screenPoint);
-    return;
-  }
-  ComPtr<IShellFolder> desktop;
-  ComPtr<IShellFolder> folder;
-  ComPtr<IContextMenu> contextMenu;
-  const bool bound =
-      SUCCEEDED(SHGetDesktopFolder(desktop.AddressOf())) &&
-      SUCCEEDED(desktop->BindToObject(pidl, nullptr,
-                                      IID_PPV_ARGS(folder.AddressOf()))) &&
-      SUCCEEDED(folder->CreateViewObject(
-          window_, IID_PPV_ARGS(contextMenu.AddressOf())));
-  ILFree(pidl);
-  if (!bound) {
-    AppendFallbackBackgroundMenu(screenPoint);
-    return;
+  IContextMenu *contextMenu = nullptr;
+  if (cachedBackgroundMenu_ != nullptr &&
+      cachedBackgroundMenuFolder_ == folderPath) {
+    contextMenu = cachedBackgroundMenu_;
+  } else {
+    if (cachedBackgroundMenu_ != nullptr) {
+      cachedBackgroundMenu_->Release();
+      cachedBackgroundMenu_ = nullptr;
+      cachedBackgroundMenuFolder_.clear();
+    }
+    PIDLIST_ABSOLUTE pidl = nullptr;
+    if (FAILED(SHParseDisplayName(folderPath.c_str(), nullptr, &pidl, 0,
+                                  nullptr)) ||
+        pidl == nullptr) {
+      AppendFallbackBackgroundMenu(screenPoint);
+      return;
+    }
+    ComPtr<IShellFolder> desktop;
+    ComPtr<IShellFolder> folder;
+    ComPtr<IContextMenu> freshContextMenu;
+    const bool bound =
+        SUCCEEDED(SHGetDesktopFolder(desktop.AddressOf())) &&
+        SUCCEEDED(desktop->BindToObject(pidl, nullptr,
+                                        IID_PPV_ARGS(folder.AddressOf()))) &&
+        SUCCEEDED(folder->CreateViewObject(
+            window_, IID_PPV_ARGS(freshContextMenu.AddressOf())));
+    ILFree(pidl);
+    if (!bound) {
+      AppendFallbackBackgroundMenu(screenPoint);
+      return;
+    }
+    cachedBackgroundMenuFolder_ = folderPath;
+    cachedBackgroundMenu_ = freshContextMenu.Detach();
+    contextMenu = cachedBackgroundMenu_;
   }
 
   HMENU menu = CreatePopupMenu();
@@ -1767,6 +1788,9 @@ void App::ShowBackgroundShellMenu(const std::wstring &folderPath,
   if (FAILED(contextMenu->QueryContextMenu(menu, 0, IdShellMenuFirst,
                                            IdShellMenuLast, CMF_NORMAL))) {
     DestroyMenu(menu);
+    cachedBackgroundMenu_->Release();
+    cachedBackgroundMenu_ = nullptr;
+    cachedBackgroundMenuFolder_.clear();
     AppendFallbackBackgroundMenu(screenPoint);
     return;
   }
@@ -1814,8 +1838,12 @@ void App::ShowBackgroundShellMenu(const std::wstring &folderPath,
     invoke.lpVerb = MAKEINTRESOURCEA(verbOffset);
     invoke.lpVerbW = MAKEINTRESOURCEW(verbOffset);
     invoke.nShow = SW_SHOWNORMAL;
-    contextMenu->InvokeCommand(
-        reinterpret_cast<CMINVOKECOMMANDINFO *>(&invoke));
+    if (FAILED(contextMenu->InvokeCommand(
+            reinterpret_cast<CMINVOKECOMMANDINFO *>(&invoke)))) {
+      cachedBackgroundMenu_->Release();
+      cachedBackgroundMenu_ = nullptr;
+      cachedBackgroundMenuFolder_.clear();
+    }
     RefreshPane(activePane_);
   }
 }
