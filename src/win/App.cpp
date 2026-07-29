@@ -85,6 +85,8 @@ enum ControlId : int {
   IdCommandSuggestions,
   IdEditSidebar,
   IdAddFolderLink,
+  IdMoveSidebarUp,
+  IdMoveSidebarDown,
   IdPromptEdit = 400,
   IdRegisteredAppBase = 1000
 };
@@ -217,12 +219,20 @@ LRESULT CALLBACK SuggestionSubclass(HWND window, UINT message, WPARAM wParam,
 }
 
 LRESULT CALLBACK ListSubclass(HWND window, UINT message, WPARAM wParam,
-                              LPARAM lParam, UINT_PTR, DWORD_PTR) {
+                              LPARAM lParam, UINT_PTR, DWORD_PTR reference) {
   if (message == WM_CHAR && wParam >= L' ') {
     if (SendMessageW(GetParent(window), kMessageCommandType, wParam,
                      reinterpret_cast<LPARAM>(window)) != 0) {
       return 0;
     }
+  }
+  if (reference == 1 && message == WM_KEYDOWN &&
+      (wParam == VK_UP || wParam == VK_DOWN) &&
+      (GetKeyState(VK_CONTROL) & 0x8000) != 0 &&
+      (GetKeyState(VK_SHIFT) & 0x8000) != 0) {
+    SendMessageW(GetParent(window), kMessageSidebarMove,
+                 wParam == VK_UP ? 1 : 0, reinterpret_cast<LPARAM>(window));
+    return 0;
   }
   return DefSubclassProc(window, message, wParam, lParam);
 }
@@ -462,7 +472,7 @@ void App::CreateControls() {
       WS_CHILD | WS_VISIBLE | WS_TABSTOP | LBS_NOTIFY | WS_VSCROLL, 0, 0, 10,
       10, window_, reinterpret_cast<HMENU>(IdSidebar), instance_, nullptr);
   SendMessageW(sidebar_, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
-  SetWindowSubclass(sidebar_, ListSubclass, 1, 0);
+  SetWindowSubclass(sidebar_, ListSubclass, 1, 1);
 
   CreatePaneControls(0);
   CreatePaneControls(1);
@@ -1336,6 +1346,28 @@ void App::RemoveSidebarItem() {
   SaveSettings();
 }
 
+void App::MoveSidebarItem(bool up) {
+  const int selected =
+      static_cast<int>(SendMessageW(sidebar_, LB_GETCURSEL, 0, 0));
+  if (selected < 0 || selected >= static_cast<int>(sidebarMap_.size()))
+    return;
+  const auto [bookmark, index] = sidebarMap_[selected];
+  const std::size_t sectionSize =
+      bookmark ? settings_.bookmarks.size() : settings_.links.size();
+  if (up ? index == 0 : index + 1 >= sectionSize)
+    return;
+  const std::size_t otherIndex = up ? index - 1 : index + 1;
+  if (bookmark) {
+    std::swap(settings_.bookmarks[index], settings_.bookmarks[otherIndex]);
+  } else {
+    std::swap(settings_.links[index], settings_.links[otherIndex]);
+  }
+  RebuildSidebar();
+  SaveSettings();
+  SendMessageW(sidebar_, LB_SETCURSEL,
+               up ? selected - 1 : selected + 1, 0);
+}
+
 void App::ShowTerminalMenu(HWND sourceButton) {
   HMENU menu = CreatePopupMenu();
   AppendMenuW(menu, MF_STRING, IdCmd, L"CMDをここで開く");
@@ -2121,6 +2153,12 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
     case IdOpenSidebarAdmin:
       ActivateSidebarItem(true);
       break;
+    case IdMoveSidebarUp:
+      MoveSidebarItem(true);
+      break;
+    case IdMoveSidebarDown:
+      MoveSidebarItem(false);
+      break;
     }
     return 0;
   }
@@ -2240,16 +2278,27 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
       const int selected =
           static_cast<int>(SendMessageW(sidebar_, LB_GETCURSEL, 0, 0));
       bool canRunAsAdmin = false;
+      bool canMoveUp = false;
+      bool canMoveDown = false;
       if (selected >= 0 && selected < static_cast<int>(sidebarMap_.size())) {
         const auto [bookmark, index] = sidebarMap_[selected];
         canRunAsAdmin =
             !bookmark && settings_.links[index].type == LinkType::Application;
+        const std::size_t sectionSize =
+            bookmark ? settings_.bookmarks.size() : settings_.links.size();
+        canMoveUp = index > 0;
+        canMoveDown = index + 1 < sectionSize;
       }
       AppendMenuW(menu, MF_STRING | (canRunAsAdmin ? 0 : MF_GRAYED),
                   IdOpenSidebarAdmin, L"管理者として実行");
       AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
       AppendMenuW(menu, MF_STRING, IdEditSidebar, L"登録を編集");
       AppendMenuW(menu, MF_STRING, IdRemoveSidebar, L"登録を削除");
+      AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+      AppendMenuW(menu, MF_STRING | (canMoveUp ? 0 : MF_GRAYED),
+                  IdMoveSidebarUp, L"上へ移動");
+      AppendMenuW(menu, MF_STRING | (canMoveDown ? 0 : MF_GRAYED),
+                  IdMoveSidebarDown, L"下へ移動");
       TrackPopupMenu(menu, TPM_RIGHTBUTTON, GET_X_LPARAM(lParam),
                      GET_Y_LPARAM(lParam), 0, window_, nullptr);
       DestroyMenu(menu);
@@ -2273,6 +2322,10 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
     return 0;
   case kMessageCommandNew:
     AddCommandRegistration();
+    return 0;
+  case kMessageSidebarMove:
+    if (reinterpret_cast<HWND>(lParam) == sidebar_)
+      MoveSidebarItem(wParam != 0);
     return 0;
   case kMessageNavigateAddress: {
     const int paneIndex = static_cast<int>(wParam);
@@ -2341,6 +2394,7 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
       RefreshPane(0);
       RefreshPane(1);
     }
+    SetFocus(panes_[activePane_].list);
     return 0;
   }
   case kMessageZipDone: {
@@ -2353,6 +2407,7 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
     } else {
       Notify(result->message, true);
     }
+    SetFocus(panes_[activePane_].list);
     return 0;
   }
   case WM_CLOSE:

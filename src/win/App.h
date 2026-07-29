@@ -105,6 +105,7 @@ private:
   void ActivateSidebarItem(bool administrator = false);
   void EditSidebarItem();
   void RemoveSidebarItem();
+  void MoveSidebarItem(bool up);
   void ShowTerminalMenu(HWND sourceButton);
   void LaunchSelectedTerminal(TerminalKind kind, bool administrator);
   void ShowFileMenu(POINT screenPoint);
