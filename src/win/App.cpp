@@ -84,6 +84,7 @@ enum ControlId : int {
   IdMoveToOther,
   IdCommandSuggestions,
   IdEditSidebar,
+  IdAddFolderLink,
   IdPromptEdit = 400,
   IdRegisteredAppBase = 1000
 };
@@ -1112,6 +1113,17 @@ void App::AddCurrentBookmark() {
   const std::wstring path = pane.searchMode ? pane.searchRoot : pane.path;
   if (path.empty())
     return;
+  AddBookmarkForPath(path);
+}
+
+void App::AddLinkedFolder() {
+  const std::wstring path = PickFolder(window_, L"フォルダーリンクを登録");
+  if (path.empty())
+    return;
+  AddBookmarkForPath(path);
+}
+
+void App::AddBookmarkForPath(const std::wstring &path) {
   const std::wstring name =
       PromptText(L"ブックマーク追加", L"表示名", LeafName(path));
   if (name.empty())
@@ -1651,6 +1663,7 @@ void App::LaunchRegisteredApplication(std::size_t index, bool administrator,
 
 void App::ShowLinkMenu(HWND sourceButton) {
   HMENU menu = CreatePopupMenu();
+  AppendMenuW(menu, MF_STRING, IdAddFolderLink, L"フォルダーリンクを追加");
   AppendMenuW(menu, MF_STRING, IdAddFileLink, L"ファイルリンクを追加");
   AppendMenuW(menu, MF_STRING, IdAddAppLink, L"アプリリンクを追加");
   RECT rectangle{};
@@ -1988,6 +2001,9 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
       break;
     case IdAddLink:
       ShowLinkMenu(toolbar_[4]);
+      break;
+    case IdAddFolderLink:
+      AddLinkedFolder();
       break;
     case IdAddFileLink:
       AddLink(false);

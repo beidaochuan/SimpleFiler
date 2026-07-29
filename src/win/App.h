@@ -98,6 +98,8 @@ private:
   void NewFolder();
   void ShowSelectedProperties();
   void AddCurrentBookmark();
+  void AddLinkedFolder();
+  void AddBookmarkForPath(const std::wstring &path);
   void AddLink(bool application);
   void RebuildSidebar();
   void ActivateSidebarItem(bool administrator = false);
