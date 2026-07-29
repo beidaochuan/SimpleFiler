@@ -7,6 +7,8 @@
 
 #include <windows.h>
 
+#include <shobjidl.h>
+
 #include <cstdint>
 #include <filesystem>
 #include <memory>
@@ -109,6 +111,9 @@ private:
   void ShowTerminalMenu(HWND sourceButton);
   void LaunchSelectedTerminal(TerminalKind kind, bool administrator);
   void ShowFileMenu(POINT screenPoint);
+  void ShowBackgroundShellMenu(const std::wstring &folderPath,
+                               POINT screenPoint);
+  void AppendFallbackBackgroundMenu(POINT screenPoint);
   void ShowLinkMenu(HWND sourceButton);
   void CreateZipFromSelection();
   void ExtractSelectedZip();
@@ -155,6 +160,8 @@ private:
   ULONGLONG commandPrefixTick_ = 0;
   AppSettings settings_;
   SettingsStore settingsStore_;
+  IContextMenu2 *activeBackgroundMenu2_ = nullptr;
+  IContextMenu3 *activeBackgroundMenu3_ = nullptr;
 };
 
 } // namespace sf::win

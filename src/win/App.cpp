@@ -88,7 +88,9 @@ enum ControlId : int {
   IdMoveSidebarUp,
   IdMoveSidebarDown,
   IdPromptEdit = 400,
-  IdRegisteredAppBase = 1000
+  IdRegisteredAppBase = 1000,
+  IdShellMenuFirst = 2000,
+  IdShellMenuLast = 2999
 };
 
 struct PromptState final {
@@ -325,6 +327,24 @@ std::wstring ResolveAppPath(const std::wstring &path) {
 std::wstring MakeAppPath(const std::wstring &path) {
   return sf::MakePortablePath(path, ExecutablePath().parent_path()).wstring();
 }
+
+template <typename T> class ComPtr final {
+public:
+  ComPtr() = default;
+  ComPtr(const ComPtr &) = delete;
+  ComPtr &operator=(const ComPtr &) = delete;
+  ~ComPtr() {
+    if (ptr_ != nullptr)
+      ptr_->Release();
+  }
+  T **AddressOf() { return &ptr_; }
+  T *Get() const { return ptr_; }
+  T *operator->() const { return ptr_; }
+  explicit operator bool() const { return ptr_ != nullptr; }
+
+private:
+  T *ptr_ = nullptr;
+};
 
 HFONT CreateUiFont(UINT dpi) {
   NONCLIENTMETRICSW metrics{};
@@ -1705,13 +1725,114 @@ void App::ShowLinkMenu(HWND sourceButton) {
   DestroyMenu(menu);
 }
 
+void App::AppendFallbackBackgroundMenu(POINT screenPoint) {
+  HMENU menu = CreatePopupMenu();
+  AppendMenuW(menu, MF_STRING, IdPaste, L"貼り付け");
+  AppendMenuW(menu, MF_STRING, IdNewFolder, L"新しいフォルダー");
+  const UINT selectedCommand =
+      TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, screenPoint.x,
+                     screenPoint.y, 0, window_, nullptr);
+  DestroyMenu(menu);
+  if (selectedCommand != 0)
+    SendMessageW(window_, WM_COMMAND, selectedCommand, 0);
+}
+
+void App::ShowBackgroundShellMenu(const std::wstring &folderPath,
+                                  POINT screenPoint) {
+  PIDLIST_ABSOLUTE pidl = nullptr;
+  if (FAILED(SHParseDisplayName(folderPath.c_str(), nullptr, &pidl, 0,
+                                nullptr)) ||
+      pidl == nullptr) {
+    AppendFallbackBackgroundMenu(screenPoint);
+    return;
+  }
+  ComPtr<IShellFolder> desktop;
+  ComPtr<IShellFolder> folder;
+  ComPtr<IContextMenu> contextMenu;
+  const bool bound =
+      SUCCEEDED(SHGetDesktopFolder(desktop.AddressOf())) &&
+      SUCCEEDED(desktop->BindToObject(pidl, nullptr,
+                                      IID_PPV_ARGS(folder.AddressOf()))) &&
+      SUCCEEDED(folder->CreateViewObject(
+          window_, IID_PPV_ARGS(contextMenu.AddressOf())));
+  ILFree(pidl);
+  if (!bound) {
+    AppendFallbackBackgroundMenu(screenPoint);
+    return;
+  }
+
+  HMENU menu = CreatePopupMenu();
+  // The background menu has no selected item, so CMF_CANRENAME (which
+  // Explorer only sets for a single-item selection) is intentionally omitted.
+  if (FAILED(contextMenu->QueryContextMenu(menu, 0, IdShellMenuFirst,
+                                           IdShellMenuLast, CMF_NORMAL))) {
+    DestroyMenu(menu);
+    AppendFallbackBackgroundMenu(screenPoint);
+    return;
+  }
+
+  ComPtr<IContextMenu2> contextMenu2;
+  ComPtr<IContextMenu3> contextMenu3;
+  static_cast<void>(
+      contextMenu->QueryInterface(IID_PPV_ARGS(contextMenu2.AddressOf())));
+  static_cast<void>(
+      contextMenu->QueryInterface(IID_PPV_ARGS(contextMenu3.AddressOf())));
+
+  const UINT selectedCommand = [&] {
+    // Scope guard: HandleMessage forwards WM_INITMENUPOPUP/WM_MENUCHAR/etc.
+    // to these pointers only while they are armed here, and they must be
+    // disarmed before returning on every path, including early returns
+    // added later, so any lingering pointer can't be used after this
+    // function releases it.
+    struct ScopedActiveMenu final {
+      App &app;
+      ScopedActiveMenu(App &app, IContextMenu2 *menu2, IContextMenu3 *menu3)
+          : app(app) {
+        app.activeBackgroundMenu2_ = menu2;
+        app.activeBackgroundMenu3_ = menu3;
+      }
+      ~ScopedActiveMenu() {
+        app.activeBackgroundMenu2_ = nullptr;
+        app.activeBackgroundMenu3_ = nullptr;
+      }
+    } scopedActiveMenu(*this, contextMenu2.Get(), contextMenu3.Get());
+    return TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON,
+                          screenPoint.x, screenPoint.y, 0, window_, nullptr);
+  }();
+  DestroyMenu(menu);
+
+  if (selectedCommand >= IdShellMenuFirst &&
+      selectedCommand <= IdShellMenuLast) {
+    // lpVerb/lpVerbW must carry the *offset* from idCmdFirst, packed via
+    // MAKEINTRESOURCE, not the raw command ID or a real string pointer;
+    // CMIC_MASK_UNICODE tells the shell to prefer lpVerbW.
+    const UINT_PTR verbOffset = selectedCommand - IdShellMenuFirst;
+    CMINVOKECOMMANDINFOEX invoke{};
+    invoke.cbSize = sizeof(invoke);
+    invoke.fMask = CMIC_MASK_UNICODE;
+    invoke.hwnd = window_;
+    invoke.lpVerb = MAKEINTRESOURCEA(verbOffset);
+    invoke.lpVerbW = MAKEINTRESOURCEW(verbOffset);
+    invoke.nShow = SW_SHOWNORMAL;
+    contextMenu->InvokeCommand(
+        reinterpret_cast<CMINVOKECOMMANDINFO *>(&invoke));
+    RefreshPane(activePane_);
+  }
+}
+
 void App::ShowFileMenu(POINT point) {
   const auto paths = SelectedPaths();
-  HMENU menu = CreatePopupMenu();
   if (paths.empty()) {
-    AppendMenuW(menu, MF_STRING, IdPaste, L"貼り付け");
-    AppendMenuW(menu, MF_STRING, IdNewFolder, L"新しいフォルダー");
-  } else {
+    const Pane &pane = panes_[activePane_];
+    const std::wstring folder = pane.searchMode ? pane.searchRoot : pane.path;
+    if (pane.driveView || folder.empty())
+      AppendFallbackBackgroundMenu(point);
+    else
+      ShowBackgroundShellMenu(folder, point);
+    return;
+  }
+  HMENU menu = CreatePopupMenu();
+  {
     AppendMenuW(menu, MF_STRING, IdOpen, L"開く");
 
     HMENU applications = CreatePopupMenu();
@@ -2428,6 +2549,29 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
   case WM_DESTROY:
     PostQuitMessage(0);
     return 0;
+  case WM_INITMENUPOPUP:
+  case WM_UNINITMENUPOPUP:
+  case WM_DRAWITEM:
+  case WM_MEASUREITEM:
+    // activeBackgroundMenu2_ is only non-null while ShowBackgroundShellMenu's
+    // own TrackPopupMenu call is modal, so no other popup menu can be active
+    // at the same time.
+    if (activeBackgroundMenu2_ != nullptr &&
+        SUCCEEDED(
+            activeBackgroundMenu2_->HandleMenuMsg(message, wParam, lParam))) {
+      return 0;
+    }
+    break;
+  case WM_MENUCHAR: {
+    if (activeBackgroundMenu3_ != nullptr) {
+      LRESULT result = 0;
+      if (SUCCEEDED(activeBackgroundMenu3_->HandleMenuMsg2(
+              message, wParam, lParam, &result))) {
+        return result;
+      }
+    }
+    break;
+  }
   }
   return DefWindowProcW(window_, message, wParam, lParam);
 }
