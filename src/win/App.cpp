@@ -707,6 +707,7 @@ void App::CreateAccelerators() {
                           {FVIRTKEY, VK_F5, IdCopyToOther},
                           {FVIRTKEY, VK_F6, IdMoveToOther},
                           {FVIRTKEY, VK_F7, IdNewFolder},
+                          {FVIRTKEY | FCONTROL, 'N', IdNewFolder},
                           {FVIRTKEY, VK_BACK, IdUp},
                           {FVIRTKEY | FALT, VK_LEFT, IdBack},
                           {FVIRTKEY | FALT, VK_RIGHT, IdForward},
