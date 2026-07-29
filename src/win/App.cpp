@@ -351,6 +351,17 @@ private:
   T *ptr_ = nullptr;
 };
 
+struct PidlDeleter final {
+  using pointer = PIDLIST_ABSOLUTE;
+
+  void operator()(pointer pidl) const {
+    if (pidl != nullptr)
+      ILFree(pidl);
+  }
+};
+
+using UniquePidl = std::unique_ptr<ITEMIDLIST_ABSOLUTE, PidlDeleter>;
+
 HFONT CreateUiFont(UINT dpi) {
   NONCLIENTMETRICSW metrics{};
   metrics.cbSize = sizeof(metrics);
@@ -1812,18 +1823,17 @@ void App::ShowBackgroundShellMenu(const std::wstring &folderPath,
       App &app;
       ScopedActiveMenu(App &app, IContextMenu2 *menu2, IContextMenu3 *menu3)
           : app(app) {
-        app.activeBackgroundMenu2_ = menu2;
-        app.activeBackgroundMenu3_ = menu3;
+        app.activeShellMenu2_ = menu2;
+        app.activeShellMenu3_ = menu3;
       }
       ~ScopedActiveMenu() {
-        app.activeBackgroundMenu2_ = nullptr;
-        app.activeBackgroundMenu3_ = nullptr;
+        app.activeShellMenu2_ = nullptr;
+        app.activeShellMenu3_ = nullptr;
       }
     } scopedActiveMenu(*this, contextMenu2.Get(), contextMenu3.Get());
     return TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON,
                           screenPoint.x, screenPoint.y, 0, window_, nullptr);
   }();
-  DestroyMenu(menu);
 
   if (selectedCommand >= IdShellMenuFirst &&
       selectedCommand <= IdShellMenuLast) {
@@ -1846,6 +1856,147 @@ void App::ShowBackgroundShellMenu(const std::wstring &folderPath,
     }
     RefreshPane(activePane_);
   }
+  // The dynamically populated "New" submenu keeps command state in its menu
+  // items until InvokeCommand returns. Destroying the menu first makes commands
+  // such as "New Folder" fail with E_FAIL.
+  DestroyMenu(menu);
+}
+
+bool App::ShowItemShellMenu(const std::vector<std::wstring> &paths,
+                            POINT screenPoint) {
+  if (paths.empty())
+    return false;
+
+  std::vector<UniquePidl> itemPidls;
+  std::vector<PCUITEMID_CHILD> childPidls;
+  itemPidls.reserve(paths.size());
+  childPidls.reserve(paths.size());
+
+  UniquePidl parentPidl;
+  for (const std::wstring &path : paths) {
+    PIDLIST_ABSOLUTE rawItemPidl = nullptr;
+    if (FAILED(SHParseDisplayName(path.c_str(), nullptr, &rawItemPidl, 0,
+                                  nullptr)) ||
+        rawItemPidl == nullptr) {
+      return false;
+    }
+    UniquePidl itemPidl(rawItemPidl);
+    UniquePidl currentParent(ILCloneFull(itemPidl.get()));
+    if (!currentParent || !ILRemoveLastID(currentParent.get()))
+      return false;
+    if (!parentPidl) {
+      parentPidl.reset(ILCloneFull(currentParent.get()));
+      if (!parentPidl)
+        return false;
+    } else if (!ILIsEqual(parentPidl.get(), currentParent.get())) {
+      // IShellFolder::GetUIObjectOf requires all selected child PIDLs to be
+      // relative to one parent. This can occur for cross-folder search results.
+      return false;
+    }
+
+    childPidls.push_back(ILFindLastID(itemPidl.get()));
+    itemPidls.push_back(std::move(itemPidl));
+  }
+
+  ComPtr<IShellFolder> parentFolder;
+  PCUITEMID_CHILD ignoredChild = nullptr;
+  if (FAILED(SHBindToParent(
+          itemPidls.front().get(), IID_IShellFolder,
+          reinterpret_cast<void **>(parentFolder.AddressOf()),
+          &ignoredChild))) {
+    return false;
+  }
+
+  ComPtr<IContextMenu> contextMenu;
+  if (FAILED(parentFolder->GetUIObjectOf(
+          window_, static_cast<UINT>(childPidls.size()), childPidls.data(),
+          IID_IContextMenu, nullptr,
+          reinterpret_cast<void **>(contextMenu.AddressOf())))) {
+    return false;
+  }
+
+  HMENU menu = CreatePopupMenu();
+  if (menu == nullptr)
+    return false;
+
+  UINT queryFlags = CMF_NORMAL | CMF_ITEMMENU;
+  if (paths.size() == 1)
+    queryFlags |= CMF_CANRENAME;
+  if ((GetKeyState(VK_SHIFT) & 0x8000) != 0)
+    queryFlags |= CMF_EXTENDEDVERBS;
+  if (FAILED(contextMenu->QueryContextMenu(
+          menu, 0, IdShellMenuFirst, IdShellMenuLast, queryFlags))) {
+    DestroyMenu(menu);
+    return false;
+  }
+
+  ComPtr<IContextMenu2> contextMenu2;
+  ComPtr<IContextMenu3> contextMenu3;
+  static_cast<void>(
+      contextMenu->QueryInterface(IID_PPV_ARGS(contextMenu2.AddressOf())));
+  static_cast<void>(
+      contextMenu->QueryInterface(IID_PPV_ARGS(contextMenu3.AddressOf())));
+
+  const UINT selectedCommand = [&] {
+    struct ScopedActiveMenu final {
+      App &app;
+      ScopedActiveMenu(App &app, IContextMenu2 *menu2, IContextMenu3 *menu3)
+          : app(app) {
+        app.activeShellMenu2_ = menu2;
+        app.activeShellMenu3_ = menu3;
+      }
+      ~ScopedActiveMenu() {
+        app.activeShellMenu2_ = nullptr;
+        app.activeShellMenu3_ = nullptr;
+      }
+    } scopedActiveMenu(*this, contextMenu2.Get(), contextMenu3.Get());
+    return TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON,
+                          screenPoint.x, screenPoint.y, 0, window_, nullptr);
+  }();
+
+  bool openInSimpleFiler = false;
+  bool renameInSimpleFiler = false;
+  if (selectedCommand >= IdShellMenuFirst &&
+      selectedCommand <= IdShellMenuLast) {
+    const UINT_PTR verbOffset = selectedCommand - IdShellMenuFirst;
+    std::array<wchar_t, 128> canonicalVerb{};
+    if (SUCCEEDED(contextMenu->GetCommandString(
+            verbOffset, GCS_VERBW, nullptr,
+            reinterpret_cast<char *>(canonicalVerb.data()),
+            static_cast<UINT>(canonicalVerb.size())))) {
+      openInSimpleFiler =
+          paths.size() == 1 && _wcsicmp(canonicalVerb.data(), L"open") == 0;
+      renameInSimpleFiler =
+          paths.size() == 1 && _wcsicmp(canonicalVerb.data(), L"rename") == 0;
+    }
+
+    if (!openInSimpleFiler && !renameInSimpleFiler) {
+      CMINVOKECOMMANDINFOEX invoke{};
+      invoke.cbSize = sizeof(invoke);
+      invoke.fMask = CMIC_MASK_UNICODE | CMIC_MASK_PTINVOKE;
+      if ((GetKeyState(VK_SHIFT) & 0x8000) != 0)
+        invoke.fMask |= CMIC_MASK_SHIFT_DOWN;
+      if ((GetKeyState(VK_CONTROL) & 0x8000) != 0)
+        invoke.fMask |= CMIC_MASK_CONTROL_DOWN;
+      invoke.hwnd = window_;
+      invoke.lpVerb = MAKEINTRESOURCEA(verbOffset);
+      invoke.lpVerbW = MAKEINTRESOURCEW(verbOffset);
+      invoke.nShow = SW_SHOWNORMAL;
+      invoke.ptInvoke = screenPoint;
+      static_cast<void>(contextMenu->InvokeCommand(
+          reinterpret_cast<CMINVOKECOMMANDINFO *>(&invoke)));
+      RefreshPane(activePane_);
+    }
+  }
+
+  // Cascading shell extensions can retain command state in the HMENU until
+  // InvokeCommand has completed.
+  DestroyMenu(menu);
+  if (openInSimpleFiler)
+    OpenSelected();
+  else if (renameInSimpleFiler)
+    BeginRename();
+  return true;
 }
 
 void App::ShowFileMenu(POINT point) {
@@ -1859,6 +2010,11 @@ void App::ShowFileMenu(POINT point) {
       ShowBackgroundShellMenu(folder, point);
     return;
   }
+  if (ShowItemShellMenu(paths, point))
+    return;
+
+  // Keep the existing commands available if Windows cannot create one shell
+  // context menu (for example, search results selected across parent folders).
   HMENU menu = CreatePopupMenu();
   {
     AppendMenuW(menu, MF_STRING, IdOpen, L"開く");
@@ -2581,20 +2737,18 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
   case WM_UNINITMENUPOPUP:
   case WM_DRAWITEM:
   case WM_MEASUREITEM:
-    // activeBackgroundMenu2_ is only non-null while ShowBackgroundShellMenu's
-    // own TrackPopupMenu call is modal, so no other popup menu can be active
-    // at the same time.
-    if (activeBackgroundMenu2_ != nullptr &&
-        SUCCEEDED(
-            activeBackgroundMenu2_->HandleMenuMsg(message, wParam, lParam))) {
+    // activeShellMenu2_ is only non-null while a shell TrackPopupMenu call is
+    // modal, so no other popup menu can be active at the same time.
+    if (activeShellMenu2_ != nullptr &&
+        SUCCEEDED(activeShellMenu2_->HandleMenuMsg(message, wParam, lParam))) {
       return 0;
     }
     break;
   case WM_MENUCHAR: {
-    if (activeBackgroundMenu3_ != nullptr) {
+    if (activeShellMenu3_ != nullptr) {
       LRESULT result = 0;
-      if (SUCCEEDED(activeBackgroundMenu3_->HandleMenuMsg2(
-              message, wParam, lParam, &result))) {
+      if (SUCCEEDED(activeShellMenu3_->HandleMenuMsg2(message, wParam, lParam,
+                                                       &result))) {
         return result;
       }
     }

@@ -111,6 +111,9 @@ private:
   void ShowTerminalMenu(HWND sourceButton);
   void LaunchSelectedTerminal(TerminalKind kind, bool administrator);
   void ShowFileMenu(POINT screenPoint);
+  [[nodiscard]] bool
+  ShowItemShellMenu(const std::vector<std::wstring> &paths,
+                    POINT screenPoint);
   void ShowBackgroundShellMenu(const std::wstring &folderPath,
                                POINT screenPoint);
   void AppendFallbackBackgroundMenu(POINT screenPoint);
@@ -160,8 +163,8 @@ private:
   ULONGLONG commandPrefixTick_ = 0;
   AppSettings settings_;
   SettingsStore settingsStore_;
-  IContextMenu2 *activeBackgroundMenu2_ = nullptr;
-  IContextMenu3 *activeBackgroundMenu3_ = nullptr;
+  IContextMenu2 *activeShellMenu2_ = nullptr;
+  IContextMenu3 *activeShellMenu3_ = nullptr;
   std::wstring cachedBackgroundMenuFolder_;
   IContextMenu *cachedBackgroundMenu_ = nullptr;
 };
