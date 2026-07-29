@@ -77,6 +77,7 @@ private:
   void LayoutControls(int width, int height);
   void ApplyDpi(UINT dpi);
   void UpdateActivePaneVisuals();
+  void RestorePaneFocusIfNeeded();
   void CreateAccelerators();
   void InitializeFromSettings(const std::wstring &initialPath);
   void VerifySettingsWritable();

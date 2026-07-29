@@ -16,5 +16,6 @@ inline constexpr UINT kMessageCommandMove = WM_APP + 9;
 inline constexpr UINT kMessageCommandDismiss = WM_APP + 10;
 inline constexpr UINT kMessageCommandNew = WM_APP + 11;
 inline constexpr UINT kMessageSidebarMove = WM_APP + 12;
+inline constexpr UINT kMessageRestoreFocus = WM_APP + 13;
 
 } // namespace sf::win

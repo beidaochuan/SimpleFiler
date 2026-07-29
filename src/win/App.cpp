@@ -693,6 +693,14 @@ void App::UpdateActivePaneVisuals() {
   }
 }
 
+void App::RestorePaneFocusIfNeeded() {
+  if (!IsWindowEnabled(window_) || GetActiveWindow() != window_)
+    return;
+  const HWND focus = GetFocus();
+  if (focus == nullptr || focus == window_ || !IsChild(window_, focus))
+    SetFocus(panes_[activePane_].list);
+}
+
 void App::CreateAccelerators() {
   const ACCEL values[] = {{FVIRTKEY | FCONTROL, 'C', IdCopy},
                           {FVIRTKEY | FCONTROL, 'X', IdCut},
@@ -2126,6 +2134,7 @@ int App::PaneIndexFromControl(HWND control) const {
 std::wstring App::PromptText(const std::wstring &title,
                              const std::wstring &label,
                              const std::wstring &initial) const {
+  const HWND previousFocus = GetFocus();
   PromptState state{label, initial};
   state.font = uiFont_;
   state.dpi = dpi_;
@@ -2154,7 +2163,14 @@ std::wstring App::PromptText(const std::wstring &title,
     }
   }
   EnableWindow(window_, TRUE);
+  SetActiveWindow(window_);
   SetForegroundWindow(window_);
+  if (previousFocus != nullptr && IsWindow(previousFocus) &&
+      (previousFocus == window_ || IsChild(window_, previousFocus))) {
+    SetFocus(previousFocus);
+  } else {
+    SetFocus(panes_[activePane_].list);
+  }
   return state.accepted ? state.value : std::wstring{};
 }
 
@@ -2177,6 +2193,13 @@ LRESULT CALLBACK App::WindowProcedure(HWND window, UINT message, WPARAM wParam,
 
 LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
   switch (message) {
+  case WM_ACTIVATE:
+    if (LOWORD(wParam) != WA_INACTIVE)
+      PostMessageW(window_, kMessageRestoreFocus, 0, 0);
+    break;
+  case WM_SETFOCUS:
+    PostMessageW(window_, kMessageRestoreFocus, 0, 0);
+    break;
   case WM_GETMINMAXINFO: {
     auto *limits = reinterpret_cast<MINMAXINFO *>(lParam);
     limits->ptMinTrackSize.x =
@@ -2466,6 +2489,7 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
       MoveSidebarItem(false);
       break;
     }
+    PostMessageW(window_, kMessageRestoreFocus, 0, 0);
     return 0;
   }
   case WM_NOTIFY: {
@@ -2512,6 +2536,7 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
         POINT point{};
         GetCursorPos(&point);
         ShowFileMenu(point);
+        PostMessageW(window_, kMessageRestoreFocus, 0, 0);
       } else if (header->code == LVN_KEYDOWN) {
         const auto *key = reinterpret_cast<NMLVKEYDOWN *>(lParam);
         if (key->wVKey == VK_RETURN) {
@@ -2608,6 +2633,7 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
       TrackPopupMenu(menu, TPM_RIGHTBUTTON, GET_X_LPARAM(lParam),
                      GET_Y_LPARAM(lParam), 0, window_, nullptr);
       DestroyMenu(menu);
+      PostMessageW(window_, kMessageRestoreFocus, 0, 0);
       return 0;
     }
     break;
@@ -2632,6 +2658,9 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
   case kMessageSidebarMove:
     if (reinterpret_cast<HWND>(lParam) == sidebar_)
       MoveSidebarItem(wParam != 0);
+    return 0;
+  case kMessageRestoreFocus:
+    RestorePaneFocusIfNeeded();
     return 0;
   case kMessageNavigateAddress: {
     const int paneIndex = static_cast<int>(wParam);
@@ -2725,6 +2754,7 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
                       pendingFileOperations_ + pendingZipOperations_);
       if (MessageBoxW(window_, closeWarning.c_str(), L"SimpleFiler を終了",
                       MB_ICONWARNING | MB_YESNO | MB_DEFBUTTON2) != IDYES) {
+        PostMessageW(window_, kMessageRestoreFocus, 0, 0);
         return 0;
       }
     }
