@@ -110,6 +110,9 @@ public static class SimpleFilerNativeMethods
     public static extern bool SetForegroundWindow(IntPtr window);
 
     [DllImport("user32.dll")]
+    public static extern IntPtr GetForegroundWindow();
+
+    [DllImport("user32.dll")]
     public static extern bool ShowWindow(IntPtr window, int command);
 
     [DllImport("user32.dll")]
@@ -134,6 +137,64 @@ public static class SimpleFilerNativeMethods
         IntPtr window, uint message, IntPtr maximum, StringBuilder text);
 }
 '@
+
+function Wait-Until {
+    # NOTE: on timeout, Condition is invoked one final time after the deadline
+    # check, to avoid a race where it turns true just as the deadline passes.
+    # Most callers' conditions also send keys/messages as a side effect, so
+    # this means one extra input event can fire even when Wait-Until
+    # ultimately reports failure.
+    param(
+        [Parameter(Mandatory = $true)]
+        [scriptblock]$Condition,
+        [int]$TimeoutMilliseconds = 5000,
+        [int]$PollMilliseconds = 50
+    )
+    $deadline = [DateTime]::UtcNow.AddMilliseconds($TimeoutMilliseconds)
+    do {
+        if (& $Condition) {
+            return $true
+        }
+        Start-Sleep -Milliseconds $PollMilliseconds
+    } while ([DateTime]::UtcNow -lt $deadline)
+    return (& $Condition)
+}
+
+function Get-FocusedWindow {
+    param([Parameter(Mandatory = $true)][uint32]$ThreadId)
+    $guiInfo = [SimpleFilerNativeMethods+GUITHREADINFO]::new()
+    $guiInfo.cbSize = [Runtime.InteropServices.Marshal]::SizeOf($guiInfo)
+    if (![SimpleFilerNativeMethods]::GetGUIThreadInfo($ThreadId, [ref]$guiInfo)) {
+        return [IntPtr]::Zero
+    }
+    return $guiInfo.hwndFocus
+}
+
+function Wait-ForFocus {
+    param(
+        [Parameter(Mandatory = $true)][uint32]$ThreadId,
+        [Parameter(Mandatory = $true)][IntPtr]$Expected,
+        [int]$TimeoutMilliseconds = 5000
+    )
+    return Wait-Until -TimeoutMilliseconds $TimeoutMilliseconds -Condition {
+        (Get-FocusedWindow -ThreadId $ThreadId) -eq $Expected
+    }
+}
+
+function Set-ForegroundReliable {
+    # SetForegroundWindow can silently fail (Windows' foreground-lock-timeout
+    # policy). Verifying and retrying tolerates transient failures instead of
+    # leaving later keybd_event calls aimed at a window that never activated.
+    param(
+        [Parameter(Mandatory = $true)][IntPtr]$Window,
+        [int]$TimeoutMilliseconds = 3000
+    )
+    $succeeded = Wait-Until -TimeoutMilliseconds $TimeoutMilliseconds -PollMilliseconds 100 -Condition {
+        [void][SimpleFilerNativeMethods]::SetForegroundWindow($Window)
+        [SimpleFilerNativeMethods]::GetForegroundWindow() -eq $Window
+    }
+    return $succeeded
+}
 
 $testRoot = Join-Path ([IO.Path]::GetTempPath()) (
     'simplefiler-ui-' + [Guid]::NewGuid().ToString('N'))
@@ -266,78 +327,86 @@ try {
         throw 'Initial pane navigation did not finish'
     }
     [void][SimpleFilerNativeMethods]::ShowWindow($mainWindow, 9)
-    [void][SimpleFilerNativeMethods]::SetForegroundWindow($mainWindow)
-    Start-Sleep -Milliseconds 100
-    [void][SimpleFilerNativeMethods]::SendMessage(
-        $mainWindow, 0x0111, [IntPtr]314, [IntPtr]::Zero)
-    [void][SimpleFilerNativeMethods]::SendMessage(
-        $mainWindow, 0x0111, [IntPtr]314, [IntPtr]::Zero)
     $appThread = [SimpleFilerNativeMethods]::GetWindowThreadProcessId(
         $mainWindow, [IntPtr]::Zero)
-    $guiInfo = [SimpleFilerNativeMethods+GUITHREADINFO]::new()
-    $guiInfo.cbSize = [Runtime.InteropServices.Marshal]::SizeOf($guiInfo)
-    if (![SimpleFilerNativeMethods]::GetGUIThreadInfo(
-            $appThread, [ref]$guiInfo) -or
-        $guiInfo.hwndFocus -ne $leftList) {
+    if (!(Set-ForegroundReliable -Window $mainWindow -TimeoutMilliseconds 5000)) {
+        throw 'Could not bring SimpleFiler to the foreground'
+    }
+    # Sending the pane-toggle command twice is a net no-op (it rotates back to
+    # the original active pane), so retrying the pair is safe if the window's
+    # focus has not yet settled after being restored from minimized.
+    $focusedOnLeft = Wait-Until -TimeoutMilliseconds 3000 -Condition {
+        [void][SimpleFilerNativeMethods]::SendMessage(
+            $mainWindow, 0x0111, [IntPtr]314, [IntPtr]::Zero)
+        [void][SimpleFilerNativeMethods]::SendMessage(
+            $mainWindow, 0x0111, [IntPtr]314, [IntPtr]::Zero)
+        (Get-FocusedWindow -ThreadId $appThread) -eq $leftList
+    }
+    if (!$focusedOnLeft) {
         throw 'Could not focus the left file pane before prompt test'
     }
-    [SimpleFilerNativeMethods]::keybd_event(
-        0x11, 0, 0, [UIntPtr]::Zero)
-    [SimpleFilerNativeMethods]::keybd_event(
-        0x4E, 0, 0, [UIntPtr]::Zero)
-    [SimpleFilerNativeMethods]::keybd_event(
-        0x4E, 0, 2, [UIntPtr]::Zero)
-    [SimpleFilerNativeMethods]::keybd_event(
-        0x11, 0, 2, [UIntPtr]::Zero)
-    $promptDeadline = [DateTime]::UtcNow.AddSeconds(5)
-    $prompt = [IntPtr]::Zero
-    while ($prompt -eq [IntPtr]::Zero -and
-           [DateTime]::UtcNow -lt $promptDeadline) {
-        Start-Sleep -Milliseconds 50
-        $prompt = [SimpleFilerNativeMethods]::FindThreadWindow(
-            $appThread, 'SimpleFiler.PromptWindow')
-    }
-    if ($prompt -eq [IntPtr]::Zero) {
+    # Ctrl+N goes through the hardware input queue too, so resend it while no
+    # prompt has appeared yet in case an earlier attempt missed the foreground
+    # window.
+    if (!(Wait-Until -Condition {
+            $prompt = [SimpleFilerNativeMethods]::FindThreadWindow(
+                $appThread, 'SimpleFiler.PromptWindow')
+            if ($prompt -eq [IntPtr]::Zero) {
+                [void][SimpleFilerNativeMethods]::SetForegroundWindow($mainWindow)
+                [SimpleFilerNativeMethods]::keybd_event(
+                    0x11, 0, 0, [UIntPtr]::Zero)
+                [SimpleFilerNativeMethods]::keybd_event(
+                    0x4E, 0, 0, [UIntPtr]::Zero)
+                [SimpleFilerNativeMethods]::keybd_event(
+                    0x4E, 0, 2, [UIntPtr]::Zero)
+                [SimpleFilerNativeMethods]::keybd_event(
+                    0x11, 0, 2, [UIntPtr]::Zero)
+            }
+            $prompt -ne [IntPtr]::Zero
+        })) {
         throw 'New-folder prompt was not created'
     }
-    [SimpleFilerNativeMethods]::keybd_event(
-        0x1B, 0, 0, [UIntPtr]::Zero)
-    [SimpleFilerNativeMethods]::keybd_event(
-        0x1B, 0, 2, [UIntPtr]::Zero)
-    $closeDeadline = [DateTime]::UtcNow.AddSeconds(5)
-    while ([SimpleFilerNativeMethods]::FindThreadWindow(
-               $appThread, 'SimpleFiler.PromptWindow') -ne
-           [IntPtr]::Zero -and [DateTime]::UtcNow -lt $closeDeadline) {
-        Start-Sleep -Milliseconds 50
-    }
-    if ([SimpleFilerNativeMethods]::FindThreadWindow(
-            $appThread, 'SimpleFiler.PromptWindow') -ne
-        [IntPtr]::Zero) {
+    # A scriptblock's own assignments do not escape to the caller's scope, so
+    # the handle found inside the Wait-Until above never reached this scope.
+    # Re-query it now that we know the wait succeeded.
+    $prompt = [SimpleFilerNativeMethods]::FindThreadWindow(
+        $appThread, 'SimpleFiler.PromptWindow')
+    if (!(Wait-Until -Condition {
+            if ([SimpleFilerNativeMethods]::FindThreadWindow(
+                    $appThread, 'SimpleFiler.PromptWindow') -ne
+                [IntPtr]::Zero) {
+                if (Set-ForegroundReliable -Window $prompt -TimeoutMilliseconds 500) {
+                    [SimpleFilerNativeMethods]::keybd_event(
+                        0x1B, 0, 0, [UIntPtr]::Zero)
+                    [SimpleFilerNativeMethods]::keybd_event(
+                        0x1B, 0, 2, [UIntPtr]::Zero)
+                }
+            }
+            [SimpleFilerNativeMethods]::FindThreadWindow(
+                $appThread, 'SimpleFiler.PromptWindow') -eq [IntPtr]::Zero
+        })) {
         throw 'Esc did not close the new-folder prompt'
     }
-    $promptFocusDeadline = [DateTime]::UtcNow.AddSeconds(5)
-    do {
-        Start-Sleep -Milliseconds 50
-        $guiInfo = [SimpleFilerNativeMethods+GUITHREADINFO]::new()
-        $guiInfo.cbSize =
-            [Runtime.InteropServices.Marshal]::SizeOf($guiInfo)
-        $gotGuiInfo = [SimpleFilerNativeMethods]::GetGUIThreadInfo(
-            $appThread, [ref]$guiInfo)
-    } while ((!$gotGuiInfo -or $guiInfo.hwndFocus -ne $leftList) -and
-             [DateTime]::UtcNow -lt $promptFocusDeadline)
-    if (!$gotGuiInfo -or $guiInfo.hwndFocus -ne $leftList) {
+    if (!(Wait-ForFocus -ThreadId $appThread -Expected $leftList)) {
         throw 'Esc did not restore focus after cancelling new-folder creation'
     }
-    [SimpleFilerNativeMethods]::keybd_event(
-        0x09, 0, 0, [UIntPtr]::Zero)
-    [SimpleFilerNativeMethods]::keybd_event(
-        0x09, 0, 2, [UIntPtr]::Zero)
-    Start-Sleep -Milliseconds 100
-    $guiInfo = [SimpleFilerNativeMethods+GUITHREADINFO]::new()
-    $guiInfo.cbSize = [Runtime.InteropServices.Marshal]::SizeOf($guiInfo)
-    if (![SimpleFilerNativeMethods]::GetGUIThreadInfo(
-            $appThread, [ref]$guiInfo) -or
-        $guiInfo.hwndFocus -ne $rightList) {
+    # Tab is delivered via the hardware input queue, so it only reaches
+    # SimpleFiler while the window still holds the foreground. Retrying is
+    # safe here because it is skipped once focus has already moved off
+    # leftList, so it can never double-toggle back to the wrong pane.
+    $switchedToRight = Wait-Until -TimeoutMilliseconds 5000 -Condition {
+        if ((Get-FocusedWindow -ThreadId $appThread) -eq $leftList) {
+            if ([SimpleFilerNativeMethods]::GetForegroundWindow() -ne $mainWindow) {
+                [void][SimpleFilerNativeMethods]::SetForegroundWindow($mainWindow)
+            }
+            [SimpleFilerNativeMethods]::keybd_event(
+                0x09, 0, 0, [UIntPtr]::Zero)
+            [SimpleFilerNativeMethods]::keybd_event(
+                0x09, 0, 2, [UIntPtr]::Zero)
+        }
+        (Get-FocusedWindow -ThreadId $appThread) -eq $rightList
+    }
+    if (!$switchedToRight) {
         throw 'Tab did not switch panes after cancelling new-folder creation'
     }
     [void][SimpleFilerNativeMethods]::SendMessage(
@@ -355,50 +424,36 @@ try {
     if ($itemCount -eq 0) {
         throw 'No file-list item was available for the property test'
     }
-    [SimpleFilerNativeMethods]::keybd_event(
-        0x24, 0, 0, [UIntPtr]::Zero)
-    [SimpleFilerNativeMethods]::keybd_event(
-        0x24, 0, 2, [UIntPtr]::Zero)
-    Start-Sleep -Milliseconds 100
-    $selectedItem = [SimpleFilerNativeMethods]::SendMessage(
-        $leftList, 0x100C, [IntPtr](-1), [IntPtr]2).ToInt32()
-    if ($selectedItem -lt 0) {
+    if (!(Wait-Until -TimeoutMilliseconds 5000 -Condition {
+            [void][SimpleFilerNativeMethods]::SetForegroundWindow($mainWindow)
+            [SimpleFilerNativeMethods]::keybd_event(
+                0x24, 0, 0, [UIntPtr]::Zero)
+            [SimpleFilerNativeMethods]::keybd_event(
+                0x24, 0, 2, [UIntPtr]::Zero)
+            [SimpleFilerNativeMethods]::SendMessage(
+                $leftList, 0x100C, [IntPtr](-1), [IntPtr]2).ToInt32() -ge 0
+        })) {
         throw 'Could not select a file-list item for the property test'
     }
     [void][SimpleFilerNativeMethods]::PostMessage(
         $mainWindow, 0x0111, [IntPtr]307, [IntPtr]::Zero)
-    $propertyDeadline = [DateTime]::UtcNow.AddSeconds(10)
-    $propertyWindow = [IntPtr]::Zero
-    while ($propertyWindow -eq [IntPtr]::Zero -and
-           [DateTime]::UtcNow -lt $propertyDeadline) {
-        Start-Sleep -Milliseconds 50
-        $propertyWindow =
-            [SimpleFilerNativeMethods]::FindOwnedWindow($mainWindow)
-    }
-    if ($propertyWindow -eq [IntPtr]::Zero) {
+    if (!(Wait-Until -TimeoutMilliseconds 10000 -Condition {
+            [SimpleFilerNativeMethods]::FindOwnedWindow($mainWindow) -ne
+                [IntPtr]::Zero
+        })) {
         throw 'Windows property sheet was not created'
     }
+    # As above: re-query outside the scriptblock instead of relying on its
+    # (non-escaping) local assignment.
+    $propertyWindow = [SimpleFilerNativeMethods]::FindOwnedWindow($mainWindow)
     [void][SimpleFilerNativeMethods]::PostMessage(
         $propertyWindow, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero)
-    $propertyCloseDeadline = [DateTime]::UtcNow.AddSeconds(10)
-    while ([SimpleFilerNativeMethods]::IsWindow($propertyWindow) -and
-           [DateTime]::UtcNow -lt $propertyCloseDeadline) {
-        Start-Sleep -Milliseconds 50
-    }
-    if ([SimpleFilerNativeMethods]::IsWindow($propertyWindow)) {
+    if (!(Wait-Until -TimeoutMilliseconds 10000 -Condition {
+            !([SimpleFilerNativeMethods]::IsWindow($propertyWindow))
+        })) {
         throw 'Windows property sheet did not close'
     }
-    $focusDeadline = [DateTime]::UtcNow.AddSeconds(5)
-    do {
-        Start-Sleep -Milliseconds 50
-        $guiInfo = [SimpleFilerNativeMethods+GUITHREADINFO]::new()
-        $guiInfo.cbSize =
-            [Runtime.InteropServices.Marshal]::SizeOf($guiInfo)
-        $gotGuiInfo = [SimpleFilerNativeMethods]::GetGUIThreadInfo(
-            $appThread, [ref]$guiInfo)
-    } while ((!$gotGuiInfo -or $guiInfo.hwndFocus -ne $leftList) -and
-             [DateTime]::UtcNow -lt $focusDeadline)
-    if (!$gotGuiInfo -or $guiInfo.hwndFocus -ne $leftList) {
+    if (!(Wait-ForFocus -ThreadId $appThread -Expected $leftList)) {
         throw 'Closing the property sheet did not restore focus'
     }
     [void][SimpleFilerNativeMethods]::ShowWindow($mainWindow, 6)
@@ -424,6 +479,9 @@ try {
         $mainWindow, 0x0111, [IntPtr]314, [IntPtr]::Zero)
     [void][SimpleFilerNativeMethods]::PostMessage(
         $rightList, 0x0102, [IntPtr][char]'f', [IntPtr]::Zero)
+    # Negative assertion: there is no eventual true state to poll for here, so
+    # a settle-time sleep followed by a single check is intentional (a
+    # Wait-Until-style positive poll would not fit "confirm nothing happened").
     Start-Sleep -Milliseconds 100
     $directInput = [Text.StringBuilder]::new(16)
     [void][SimpleFilerNativeMethods]::SendMessageGetText(
@@ -433,10 +491,13 @@ try {
     }
     [void][SimpleFilerNativeMethods]::PostMessage(
         $rightList, 0x0102, [IntPtr][char]'f', [IntPtr]::Zero)
-    Start-Sleep -Milliseconds 100
-    [void][SimpleFilerNativeMethods]::SendMessageGetText(
-        $commandEdit, 0x000D, [IntPtr]$directInput.Capacity, $directInput)
-    if ($directInput.ToString() -ne 'ff') {
+    if (!(Wait-Until -Condition {
+            $directInput.Clear() | Out-Null
+            [void][SimpleFilerNativeMethods]::SendMessageGetText(
+                $commandEdit, 0x000D, [IntPtr]$directInput.Capacity,
+                $directInput)
+            $directInput.ToString() -eq 'ff'
+        })) {
         throw 'Typing ff in the file list did not focus command input'
     }
     [void][SimpleFilerNativeMethods]::SendMessageText(
@@ -454,10 +515,13 @@ try {
     }
     [void][SimpleFilerNativeMethods]::PostMessage(
         $leftList, 0x0102, [IntPtr][char]'a', [IntPtr]::Zero)
-    Start-Sleep -Milliseconds 100
-    [void][SimpleFilerNativeMethods]::SendMessageGetText(
-        $commandEdit, 0x000D, [IntPtr]$directInput.Capacity, $directInput)
-    if ($directInput.ToString() -ne 'aa') {
+    if (!(Wait-Until -Condition {
+            $directInput.Clear() | Out-Null
+            [void][SimpleFilerNativeMethods]::SendMessageGetText(
+                $commandEdit, 0x000D, [IntPtr]$directInput.Capacity,
+                $directInput)
+            $directInput.ToString() -eq 'aa'
+        })) {
         throw 'Typing aa in the file list did not focus command input'
     }
     [void][SimpleFilerNativeMethods]::SendMessageText(
@@ -479,11 +543,14 @@ try {
         $suggestions, 0x0100, [IntPtr]0x0D, [IntPtr]::Zero)
     [void][SimpleFilerNativeMethods]::PostMessage(
         $suggestions, 0x0101, [IntPtr]0x0D, [IntPtr]::Zero)
-    Start-Sleep -Milliseconds 200
     $addressText = [Text.StringBuilder]::new(32768)
-    [void][SimpleFilerNativeMethods]::SendMessageGetText(
-        $leftAddress, 0x000D, [IntPtr]$addressText.Capacity, $addressText)
-    if ($addressText.ToString() -ne $targetFolder) {
+    if (!(Wait-Until -Condition {
+            $addressText.Clear() | Out-Null
+            [void][SimpleFilerNativeMethods]::SendMessageGetText(
+                $leftAddress, 0x000D, [IntPtr]$addressText.Capacity,
+                $addressText)
+            $addressText.ToString() -eq $targetFolder
+        })) {
         throw "ffwork navigated to '$addressText' instead of '$targetFolder'"
     }
 
@@ -535,18 +602,21 @@ try {
         $commandEdit, 0x0100, [IntPtr]0x2E, [IntPtr]::Zero)
     [void][SimpleFilerNativeMethods]::PostMessage(
         $commandEdit, 0x0101, [IntPtr]0x2E, [IntPtr]::Zero)
-    Start-Sleep -Milliseconds 100
     $editedText = [Text.StringBuilder]::new(128)
-    [void][SimpleFilerNativeMethods]::SendMessageGetText(
-        $commandEdit, 0x000D, [IntPtr]$editedText.Capacity, $editedText)
-    if ($editedText.ToString() -ne 'elete-check') {
+    if (!(Wait-Until -Condition {
+            $editedText.Clear() | Out-Null
+            [void][SimpleFilerNativeMethods]::SendMessageGetText(
+                $commandEdit, 0x000D, [IntPtr]$editedText.Capacity,
+                $editedText)
+            $editedText.ToString() -eq 'elete-check'
+        })) {
         throw 'Delete was not handled as text editing in the command field'
     }
 
     Write-Output 'SimpleFiler UI smoke tests passed'
 }
 finally {
-    if ($process -ne $null -and !$process.HasExited) {
+    if ($null -ne $process -and !$process.HasExited) {
         $mainWindow = $process.MainWindowHandle
         if ($mainWindow -ne [IntPtr]::Zero) {
             [void][SimpleFilerNativeMethods]::PostMessage(
