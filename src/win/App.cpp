@@ -977,6 +977,286 @@ void App::ShowAboutDialog() {
                                  MB_OK | MB_ICONINFORMATION);
 }
 
+void App::NavigatePane(int pane, const std::wstring &path, bool addHistory) {
+  paneController_.Navigate(
+      window_, pane, path, addHistory,
+      [this](const std::wstring &message, bool error) {
+        Notify(message, error);
+      },
+      [this](int changedPane, bool searchMode, bool busy) {
+        UpdatePaneSearchState(changedPane, searchMode, busy);
+      });
+}
+
+void App::RefreshPaneView(int pane) {
+  paneController_.RefreshPane(
+      window_, pane,
+      [this](const std::wstring &message, bool error) {
+        Notify(message, error);
+      },
+      [this](int changedPane, bool searchMode, bool busy) {
+        UpdatePaneSearchState(changedPane, searchMode, busy);
+      });
+}
+
+void App::StartPaneSearch(int pane, const std::wstring &query) {
+  paneController_.StartSearch(
+      window_, pane, query,
+      [this](const std::wstring &message, bool error) {
+        Notify(message, error);
+      },
+      [this](int changedPane, bool searchMode, bool busy) {
+        UpdatePaneSearchState(changedPane, searchMode, busy);
+      });
+}
+
+void App::OpenPaneSelection(int pane) {
+  paneController_.OpenSelected(
+      window_, pane,
+      [this](const std::wstring &message, bool error) {
+        Notify(message, error);
+      },
+      [this](int changedPane, bool searchMode, bool busy) {
+        UpdatePaneSearchState(changedPane, searchMode, busy);
+      });
+}
+
+void App::LaunchRegisteredApplication(std::size_t index, bool administrator,
+                                      bool passSelection) {
+  commandController_.LaunchRegisteredApplication(
+      window_, settings_, index, administrator, passSelection,
+      BuildAppArgumentContext(passSelection),
+      [this](const std::wstring &message, bool error) {
+        Notify(message, error);
+      });
+}
+
+void App::AcceptCommandSuggestion(bool control, bool shift) {
+  commandController_.AcceptCommandSuggestion(
+      window_, searchEdit_, commandSuggestions_,
+      paneController_.ListHandle(activePane_), settings_,
+      BuildAppArgumentContext(!shift), control, shift,
+      [this](const std::wstring &query) {
+        StartPaneSearch(activePane_, query);
+      },
+      [this](const std::wstring &path, bool otherPane) {
+        const int pane = otherPane && twoPanes_ ? 1 - activePane_ : activePane_;
+        NavigatePane(pane, path);
+        activePane_ = pane;
+        UpdateActivePaneVisuals();
+        UpdatePaneSearchState(activePane_,
+                              paneController_.IsSearchMode(activePane_),
+                              paneController_.IsBusy(activePane_));
+        SetFocus(paneController_.ListHandle(activePane_));
+      },
+      [this](bool administrator) {
+        terminalController_.LaunchSelectedTerminal(
+            window_, paneController_.EffectivePath(activePane_),
+            TerminalKind::CommandPrompt, administrator,
+            [this](const std::wstring &message, bool error) {
+              Notify(message, error);
+            });
+      },
+      [this](const std::wstring &message, bool error) {
+        Notify(message, error);
+      });
+}
+
+bool App::HandleOwnerDraw(WPARAM, LPARAM lParam, LRESULT &result) {
+  auto *item = reinterpret_cast<DRAWITEMSTRUCT *>(lParam);
+  if (item->CtlType == ODT_BUTTON) {
+    const bool primary = item->hwndItem == toolbar_[6];
+    const bool pressed = (item->itemState & ODS_SELECTED) != 0;
+    const bool disabled = (item->itemState & ODS_DISABLED) != 0;
+    const bool hot = (item->itemState & ODS_HOTLIGHT) != 0;
+    FillRect(item->hDC, &item->rcItem, backgroundBrush_);
+
+    RECT button = item->rcItem;
+    InflateRect(&button, -1, -1);
+    COLORREF fill = kSurfaceColor;
+    COLORREF border = kBorderColor;
+    COLORREF text = disabled ? kMutedTextColor : kTextColor;
+    if (primary) {
+      fill = pressed ? kAccentPressedColor : kAccentColor;
+      border = fill;
+      text = RGB(255, 255, 255);
+    } else if (pressed || hot) {
+      fill = pressed ? kAccentSoftColor : RGB(239, 246, 255);
+      border = RGB(147, 197, 253);
+    }
+    const int radius =
+        MulDiv(9, static_cast<int>(dpi_), USER_DEFAULT_SCREEN_DPI);
+    DrawRoundedSurface(item->hDC, button, fill, border, radius);
+
+    wchar_t label[64]{};
+    GetWindowTextW(item->hwndItem, label, static_cast<int>(std::size(label)));
+    SetBkMode(item->hDC, TRANSPARENT);
+    SetTextColor(item->hDC, text);
+    RECT textRect = item->rcItem;
+    if (pressed)
+      OffsetRect(&textRect, 0, 1);
+    DrawTextW(item->hDC, label, -1, &textRect,
+              DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    if ((item->itemState & ODS_FOCUS) != 0) {
+      RECT focus = button;
+      InflateRect(&focus, -3, -3);
+      DrawFocusRect(item->hDC, &focus);
+    }
+    result = TRUE;
+    return true;
+  }
+  if (item->CtlID != IdSidebar || item->CtlType != ODT_LISTBOX)
+    return false;
+
+  FillRect(item->hDC, &item->rcItem, sidebarBrush_);
+  if (item->itemID == static_cast<UINT>(-1)) {
+    result = TRUE;
+    return true;
+  }
+
+  RECT row = item->rcItem;
+  const int horizontalInset =
+      MulDiv(4, static_cast<int>(dpi_), USER_DEFAULT_SCREEN_DPI);
+  InflateRect(&row, -horizontalInset, -2);
+  const bool selected = (item->itemState & ODS_SELECTED) != 0;
+  if (selected) {
+    const int radius =
+        MulDiv(8, static_cast<int>(dpi_), USER_DEFAULT_SCREEN_DPI);
+    DrawRoundedSurface(item->hDC, row, kAccentSoftColor, kAccentSoftColor,
+                       radius);
+  }
+
+  const LRESULT textLength =
+      SendMessageW(sidebar_, LB_GETTEXTLEN, item->itemID, 0);
+  std::wstring text(
+      textLength > 0 ? static_cast<std::size_t>(textLength + 1) : 1U, L'\0');
+  SendMessageW(sidebar_, LB_GETTEXT, item->itemID,
+               reinterpret_cast<LPARAM>(text.data()));
+  if (textLength > 0)
+    text.resize(static_cast<std::size_t>(textLength));
+  else
+    text.clear();
+
+  SetBkMode(item->hDC, TRANSPARENT);
+  SetTextColor(item->hDC, selected ? RGB(30, 64, 175) : kTextColor);
+  RECT textRect = row;
+  textRect.left += MulDiv(10, static_cast<int>(dpi_), USER_DEFAULT_SCREEN_DPI);
+  DrawTextW(item->hDC, text.c_str(), static_cast<int>(text.size()), &textRect,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+  if ((item->itemState & ODS_FOCUS) != 0)
+    DrawFocusRect(item->hDC, &row);
+  result = TRUE;
+  return true;
+}
+
+bool App::HandleControlColor(UINT message, WPARAM wParam, LPARAM lParam,
+                             LRESULT &result) {
+  const HWND control = reinterpret_cast<HWND>(lParam);
+  HDC dc = reinterpret_cast<HDC>(wParam);
+  switch (message) {
+  case WM_CTLCOLOREDIT: {
+    SetTextColor(dc, kTextColor);
+    if (control == searchEdit_) {
+      SetBkColor(dc, kSurfaceColor);
+      result = reinterpret_cast<LRESULT>(surfaceBrush_);
+      return true;
+    }
+    const int paneIndex =
+        paneController_.PaneIndexFromControl(control, activePane_);
+    if (control == paneController_.AddressHandle(paneIndex)) {
+      const bool active = paneIndex == activePane_;
+      SetBkColor(dc, active ? kActivePaneColor : kSurfaceColor);
+      result =
+          reinterpret_cast<LRESULT>(active ? activePaneBrush_ : surfaceBrush_);
+      return true;
+    }
+    return false;
+  }
+  case WM_CTLCOLORLISTBOX:
+    SetTextColor(dc, kTextColor);
+    SetBkColor(dc, control == sidebar_ ? kSidebarColor : kSurfaceColor);
+    result = reinterpret_cast<LRESULT>(control == sidebar_ ? sidebarBrush_
+                                                           : surfaceBrush_);
+    return true;
+  case WM_CTLCOLORSTATIC:
+    SetBkMode(dc, TRANSPARENT);
+    if (control == status_) {
+      SetTextColor(dc, kMutedTextColor);
+      result = reinterpret_cast<LRESULT>(backgroundBrush_);
+      return true;
+    }
+    if (control == sidebarTitle_) {
+      SetTextColor(dc, kTextColor);
+      result = reinterpret_cast<LRESULT>(sidebarBrush_);
+      return true;
+    }
+    return false;
+  default:
+    return false;
+  }
+}
+
+bool App::HandleSplitterMessage(UINT message, WPARAM, LPARAM lParam,
+                                LRESULT &result) {
+  switch (message) {
+  case WM_LBUTTONDOWN:
+    if (twoPanes_) {
+      const int splitterWidth = MulDiv(kSplitterWidth, static_cast<int>(dpi_),
+                                       USER_DEFAULT_SCREEN_DPI);
+      const int split = paneCardRects_[0].right + splitterWidth / 2;
+      if (abs(GET_X_LPARAM(lParam) - split) <= splitterWidth) {
+        draggingSplitter_ = true;
+        SetCapture(window_);
+      }
+    }
+    result = 0;
+    return true;
+  case WM_MOUSEMOVE:
+    if (draggingSplitter_) {
+      RECT client{};
+      GetClientRect(window_, &client);
+      const int splitterWidth = MulDiv(kSplitterWidth, static_cast<int>(dpi_),
+                                       USER_DEFAULT_SCREEN_DPI);
+      const int gap =
+          MulDiv(10, static_cast<int>(dpi_), USER_DEFAULT_SCREEN_DPI);
+      const int paneLeft = sidebarVisible_ ? sidebarCardRect_.right + gap : gap;
+      const int available = client.right - paneLeft - splitterWidth - gap;
+      if (available > 0) {
+        splitRatio_ = std::clamp(
+            static_cast<double>(GET_X_LPARAM(lParam) - paneLeft) / available,
+            0.2, 0.8);
+        LayoutControls(client.right, client.bottom);
+      }
+    }
+    result = 0;
+    return true;
+  case WM_LBUTTONUP:
+    if (draggingSplitter_) {
+      draggingSplitter_ = false;
+      ReleaseCapture();
+    }
+    result = 0;
+    return true;
+  case WM_SETCURSOR:
+    if (twoPanes_ && LOWORD(lParam) == HTCLIENT) {
+      const int splitterWidth = MulDiv(kSplitterWidth, static_cast<int>(dpi_),
+                                       USER_DEFAULT_SCREEN_DPI);
+      POINT point{};
+      GetCursorPos(&point);
+      ScreenToClient(window_, &point);
+      const int split = paneCardRects_[0].right + splitterWidth / 2;
+      if (abs(point.x - split) <= splitterWidth) {
+        SetCursor(LoadCursorW(nullptr, IDC_SIZEWE));
+        result = TRUE;
+        return true;
+      }
+    }
+    return false;
+  default:
+    return false;
+  }
+}
+
 LRESULT CALLBACK App::WindowProcedure(HWND window, UINT message, WPARAM wParam,
                                       LPARAM lParam) {
   App *app = reinterpret_cast<App *>(GetWindowLongPtrW(window, GWLP_USERDATA));
@@ -991,66 +1271,9 @@ LRESULT CALLBACK App::WindowProcedure(HWND window, UINT message, WPARAM wParam,
 }
 
 LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
-  const auto notify = [this](const std::wstring &message, bool error) {
-    Notify(message, error);
-  };
-  const auto searchState = [this](int pane, bool searchMode, bool busy) {
-    UpdatePaneSearchState(pane, searchMode, busy);
-  };
-  const auto navigatePane = [this, &notify,
-                             &searchState](int pane, const std::wstring &path,
-                                           bool addHistory = true) {
-    paneController_.Navigate(window_, pane, path, addHistory, notify,
-                             searchState);
-  };
-  const auto refreshPane = [this, &notify, &searchState](int pane) {
-    paneController_.RefreshPane(window_, pane, notify, searchState);
-  };
-  const auto startSearch = [this, &notify,
-                            &searchState](int pane, const std::wstring &query) {
-    paneController_.StartSearch(window_, pane, query, notify, searchState);
-  };
-  const auto openSelected = [this, &notify, &searchState](int pane) {
-    paneController_.OpenSelected(window_, pane, notify, searchState);
-  };
-  const auto launchRegisteredApplication =
-      [this](std::size_t index, bool administrator, bool passSelection) {
-        commandController_.LaunchRegisteredApplication(
-            window_, settings_, index, administrator, passSelection,
-            BuildAppArgumentContext(passSelection),
-            [this](const std::wstring &message, bool error) {
-              Notify(message, error);
-            });
-      };
-  const auto acceptCommandSuggestion =
-      [this, &notify, &navigatePane, &startSearch](bool control, bool shift) {
-        commandController_.AcceptCommandSuggestion(
-            window_, searchEdit_, commandSuggestions_,
-            paneController_.ListHandle(activePane_), settings_,
-            BuildAppArgumentContext(!shift), control, shift,
-            [&startSearch, this](const std::wstring &query) {
-              startSearch(activePane_, query);
-            },
-            [&navigatePane, this](const std::wstring &path, bool otherPane) {
-              const int pane =
-                  otherPane && twoPanes_ ? 1 - activePane_ : activePane_;
-              navigatePane(pane, path);
-              activePane_ = pane;
-              UpdateActivePaneVisuals();
-              SetFocus(paneController_.ListHandle(activePane_));
-            },
-            [this, &notify](bool administrator) {
-              terminalController_.LaunchSelectedTerminal(
-                  window_, paneController_.EffectivePath(activePane_),
-                  TerminalKind::CommandPrompt, administrator, notify);
-            },
-            notify);
-      };
-  const ShellMenuIds shellMenuIds{
-      IdAddFolderLink,  IdAddFileLink,  IdAddAppLink, IdPaste,
-      IdNewFolder,      IdOpen,         IdCopy,       IdCut,
-      IdRename,         IdDelete,       IdProperties, IdRegisteredAppBase,
-      IdShellMenuFirst, IdShellMenuLast};
+  LRESULT appResult = 0;
+  if (HandleAppMessage(message, wParam, lParam, appResult))
+    return appResult;
 
   switch (message) {
   case WM_SYSCOMMAND:
@@ -1132,553 +1355,34 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
     return 0;
   }
   case WM_DRAWITEM: {
-    auto *item = reinterpret_cast<DRAWITEMSTRUCT *>(lParam);
-    if (item->CtlType == ODT_BUTTON) {
-      const bool primary = item->hwndItem == toolbar_[6];
-      const bool pressed = (item->itemState & ODS_SELECTED) != 0;
-      const bool disabled = (item->itemState & ODS_DISABLED) != 0;
-      const bool hot = (item->itemState & ODS_HOTLIGHT) != 0;
-      FillRect(item->hDC, &item->rcItem, backgroundBrush_);
-
-      RECT button = item->rcItem;
-      InflateRect(&button, -1, -1);
-      COLORREF fill = kSurfaceColor;
-      COLORREF border = kBorderColor;
-      COLORREF text = disabled ? kMutedTextColor : kTextColor;
-      if (primary) {
-        fill = pressed ? kAccentPressedColor : kAccentColor;
-        border = fill;
-        text = RGB(255, 255, 255);
-      } else if (pressed || hot) {
-        fill = pressed ? kAccentSoftColor : RGB(239, 246, 255);
-        border = RGB(147, 197, 253);
-      }
-      const int radius =
-          MulDiv(9, static_cast<int>(dpi_), USER_DEFAULT_SCREEN_DPI);
-      DrawRoundedSurface(item->hDC, button, fill, border, radius);
-
-      wchar_t label[64]{};
-      GetWindowTextW(item->hwndItem, label, static_cast<int>(std::size(label)));
-      SetBkMode(item->hDC, TRANSPARENT);
-      SetTextColor(item->hDC, text);
-      RECT textRect = item->rcItem;
-      if (pressed)
-        OffsetRect(&textRect, 0, 1);
-      DrawTextW(item->hDC, label, -1, &textRect,
-                DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-      if ((item->itemState & ODS_FOCUS) != 0) {
-        RECT focus = button;
-        InflateRect(&focus, -3, -3);
-        DrawFocusRect(item->hDC, &focus);
-      }
-      return TRUE;
-    }
-    if (item->CtlID == IdSidebar && item->CtlType == ODT_LISTBOX) {
-      FillRect(item->hDC, &item->rcItem, sidebarBrush_);
-      if (item->itemID == static_cast<UINT>(-1))
-        return TRUE;
-
-      RECT row = item->rcItem;
-      const int horizontalInset =
-          MulDiv(4, static_cast<int>(dpi_), USER_DEFAULT_SCREEN_DPI);
-      InflateRect(&row, -horizontalInset, -2);
-      const bool selected = (item->itemState & ODS_SELECTED) != 0;
-      if (selected) {
-        const int radius =
-            MulDiv(8, static_cast<int>(dpi_), USER_DEFAULT_SCREEN_DPI);
-        DrawRoundedSurface(item->hDC, row, kAccentSoftColor, kAccentSoftColor,
-                           radius);
-      }
-
-      const LRESULT textLength =
-          SendMessageW(sidebar_, LB_GETTEXTLEN, item->itemID, 0);
-      std::wstring text(
-          textLength > 0 ? static_cast<std::size_t>(textLength + 1) : 1U,
-          L'\0');
-      SendMessageW(sidebar_, LB_GETTEXT, item->itemID,
-                   reinterpret_cast<LPARAM>(text.data()));
-      if (textLength > 0)
-        text.resize(static_cast<std::size_t>(textLength));
-      else
-        text.clear();
-
-      SetBkMode(item->hDC, TRANSPARENT);
-      SetTextColor(item->hDC, selected ? RGB(30, 64, 175) : kTextColor);
-      RECT textRect = row;
-      textRect.left +=
-          MulDiv(10, static_cast<int>(dpi_), USER_DEFAULT_SCREEN_DPI);
-      DrawTextW(item->hDC, text.c_str(), static_cast<int>(text.size()),
-                &textRect,
-                DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-      if ((item->itemState & ODS_FOCUS) != 0)
-        DrawFocusRect(item->hDC, &row);
-      return TRUE;
-    }
-    LRESULT shellMenuResult = 0;
-    if (shellMenuController_.HandleMenuMessage(message, wParam, lParam,
-                                               shellMenuResult))
-      return shellMenuResult;
+    LRESULT result = 0;
+    if (HandleOwnerDraw(wParam, lParam, result))
+      return result;
+    if (shellMenuController_.HandleMenuMessage(message, wParam, lParam, result))
+      return result;
     break;
   }
-  case WM_CTLCOLOREDIT: {
-    const HWND control = reinterpret_cast<HWND>(lParam);
-    HDC dc = reinterpret_cast<HDC>(wParam);
-    SetTextColor(dc, kTextColor);
-    if (control == searchEdit_) {
-      SetBkColor(dc, kSurfaceColor);
-      return reinterpret_cast<LRESULT>(surfaceBrush_);
-    }
-    const int paneIndex =
-        paneController_.PaneIndexFromControl(control, activePane_);
-    if (control == paneController_.AddressHandle(paneIndex)) {
-      const bool active = paneIndex == activePane_;
-      SetBkColor(dc, active ? kActivePaneColor : kSurfaceColor);
-      return reinterpret_cast<LRESULT>(active ? activePaneBrush_
-                                              : surfaceBrush_);
-    }
-    break;
-  }
-  case WM_CTLCOLORLISTBOX: {
-    const HWND control = reinterpret_cast<HWND>(lParam);
-    HDC dc = reinterpret_cast<HDC>(wParam);
-    SetTextColor(dc, kTextColor);
-    SetBkColor(dc, control == sidebar_ ? kSidebarColor : kSurfaceColor);
-    return reinterpret_cast<LRESULT>(control == sidebar_ ? sidebarBrush_
-                                                         : surfaceBrush_);
-  }
+  case WM_CTLCOLOREDIT:
+  case WM_CTLCOLORLISTBOX:
   case WM_CTLCOLORSTATIC: {
-    const HWND control = reinterpret_cast<HWND>(lParam);
-    HDC dc = reinterpret_cast<HDC>(wParam);
-    SetBkMode(dc, TRANSPARENT);
-    if (control == status_) {
-      SetTextColor(dc, kMutedTextColor);
-      return reinterpret_cast<LRESULT>(backgroundBrush_);
-    }
-    if (control == sidebarTitle_) {
-      SetTextColor(dc, kTextColor);
-      return reinterpret_cast<LRESULT>(sidebarBrush_);
-    }
+    LRESULT result = 0;
+    if (HandleControlColor(message, wParam, lParam, result))
+      return result;
     break;
   }
-  case WM_LBUTTONDOWN: {
-    if (twoPanes_) {
-      const int splitterWidth = MulDiv(kSplitterWidth, static_cast<int>(dpi_),
-                                       USER_DEFAULT_SCREEN_DPI);
-      const int split = paneCardRects_[0].right + splitterWidth / 2;
-      if (abs(GET_X_LPARAM(lParam) - split) <= splitterWidth) {
-        draggingSplitter_ = true;
-        SetCapture(window_);
-      }
-    }
-    return 0;
-  }
+  case WM_LBUTTONDOWN:
   case WM_MOUSEMOVE:
-    if (draggingSplitter_) {
-      RECT client{};
-      GetClientRect(window_, &client);
-      const int splitterWidth = MulDiv(kSplitterWidth, static_cast<int>(dpi_),
-                                       USER_DEFAULT_SCREEN_DPI);
-      const int gap =
-          MulDiv(10, static_cast<int>(dpi_), USER_DEFAULT_SCREEN_DPI);
-      const int paneLeft = sidebarVisible_ ? sidebarCardRect_.right + gap : gap;
-      const int available = client.right - paneLeft - splitterWidth - gap;
-      if (available > 0) {
-        splitRatio_ = std::clamp(
-            static_cast<double>(GET_X_LPARAM(lParam) - paneLeft) / available,
-            0.2, 0.8);
-        LayoutControls(client.right, client.bottom);
-      }
-    }
-    return 0;
   case WM_LBUTTONUP:
-    if (draggingSplitter_) {
-      draggingSplitter_ = false;
-      ReleaseCapture();
-    }
-    return 0;
-  case WM_SETCURSOR:
-    if (twoPanes_ && LOWORD(lParam) == HTCLIENT) {
-      const int splitterWidth = MulDiv(kSplitterWidth, static_cast<int>(dpi_),
-                                       USER_DEFAULT_SCREEN_DPI);
-      POINT point{};
-      GetCursorPos(&point);
-      ScreenToClient(window_, &point);
-      const int split = paneCardRects_[0].right + splitterWidth / 2;
-      if (abs(point.x - split) <= splitterWidth) {
-        SetCursor(LoadCursorW(nullptr, IDC_SIZEWE));
-        return TRUE;
-      }
-    }
+  case WM_SETCURSOR: {
+    LRESULT result = 0;
+    if (HandleSplitterMessage(message, wParam, lParam, result))
+      return result;
     break;
-  case WM_COMMAND: {
-    const int command = LOWORD(wParam);
-    if (HIWORD(wParam) == LBN_DBLCLK && command == IdSidebar) {
-      sidebarController_.ActivateSidebarItem(
-          window_, sidebar_, settings_, false,
-          [&navigatePane, this](const std::wstring &path) {
-            navigatePane(activePane_, path);
-          },
-          [&launchRegisteredApplication](std::size_t index,
-                                         bool administrator) {
-            launchRegisteredApplication(index, administrator, true);
-          },
-          [this](const std::wstring &message, bool error) {
-            Notify(message, error);
-          });
-      return 0;
-    }
-    if (HIWORD(wParam) == LBN_DBLCLK && command == IdCommandSuggestions) {
-      acceptCommandSuggestion(false, false);
-      return 0;
-    }
-    if (HIWORD(wParam) == EN_CHANGE && command == IdSearchEdit) {
-      commandController_.RebuildCommandSuggestions(
-          searchEdit_, commandSuggestions_, settings_,
-          paneController_.EffectivePath(activePane_),
-          [this](const std::wstring &message, bool error) {
-            Notify(message, error);
-          });
-      return 0;
-    }
-    if (HIWORD(wParam) == EN_SETFOCUS &&
-        (command == IdLeftAddress || command == IdRightAddress)) {
-      commandController_.HideCommandSuggestions(commandSuggestions_);
-      activePane_ = command == IdLeftAddress ? 0 : 1;
-      UpdateActivePaneVisuals();
-    }
-    switch (command) {
-    case IdBack:
-      paneController_.NavigateHistory(window_, activePane_, -1, notify,
-                                      searchState);
-      break;
-    case IdForward:
-      paneController_.NavigateHistory(window_, activePane_, 1, notify,
-                                      searchState);
-      break;
-    case IdUp:
-      paneController_.NavigateUp(window_, activePane_, notify, searchState);
-      break;
-    case IdRefresh:
-      refreshPane(activePane_);
-      break;
-    case IdDrives:
-      paneController_.ShowDrives(window_, activePane_, true, notify,
-                                 searchState);
-      break;
-    case IdTogglePanes: {
-      twoPanes_ = !twoPanes_;
-      if (!twoPanes_ && activePane_ == 1)
-        activePane_ = 0;
-      UpdateActivePaneVisuals();
-      RECT client{};
-      GetClientRect(window_, &client);
-      LayoutControls(client.right, client.bottom);
-      break;
-    }
-    case IdToggleSidebar: {
-      sidebarVisible_ = !sidebarVisible_;
-      RECT client{};
-      GetClientRect(window_, &client);
-      LayoutControls(client.right, client.bottom);
-      break;
-    }
-    case IdAddBookmark:
-      sidebarController_.AddBookmarkForPath(
-          sidebar_, settings_, paneController_.EffectivePath(activePane_),
-          [this](const std::wstring &title, const std::wstring &label,
-                 const std::wstring &initial) {
-            return PromptText(title, label, initial);
-          },
-          [this] { SaveSettings(); });
-      break;
-    case IdAddLink:
-      shellMenuController_.ShowLinkMenu(window_, toolbar_[4], shellMenuIds);
-      break;
-    case IdAddFolderLink:
-      sidebarController_.AddLinkedFolder(
-          window_, sidebar_, settings_,
-          [this](const std::wstring &title, const std::wstring &label,
-                 const std::wstring &initial) {
-            return PromptText(title, label, initial);
-          },
-          [this] { SaveSettings(); });
-      break;
-    case IdAddFileLink:
-      sidebarController_.AddLink(
-          window_, sidebar_, settings_, false,
-          [this](const std::wstring &title, const std::wstring &label,
-                 const std::wstring &initial) {
-            return PromptText(title, label, initial);
-          },
-          [this] { SaveSettings(); });
-      break;
-    case IdAddAppLink:
-      sidebarController_.AddLink(
-          window_, sidebar_, settings_, true,
-          [this](const std::wstring &title, const std::wstring &label,
-                 const std::wstring &initial) {
-            return PromptText(title, label, initial);
-          },
-          [this] { SaveSettings(); });
-      break;
-    case IdTerminal:
-      terminalController_.ShowTerminalMenu(
-          window_, toolbar_[5], paneController_.HasPath(activePane_),
-          {IdCmd, IdCmdAdmin, IdPowerShell, IdPowerShellAdmin});
-      break;
-    case IdCmd:
-      terminalController_.LaunchSelectedTerminal(
-          window_, paneController_.EffectivePath(activePane_),
-          TerminalKind::CommandPrompt, false,
-          [this](const std::wstring &message, bool error) {
-            Notify(message, error);
-          });
-      break;
-    case IdCmdAdmin:
-      terminalController_.LaunchSelectedTerminal(
-          window_, paneController_.EffectivePath(activePane_),
-          TerminalKind::CommandPrompt, true,
-          [this](const std::wstring &message, bool error) {
-            Notify(message, error);
-          });
-      break;
-    case IdPowerShell:
-      terminalController_.LaunchSelectedTerminal(
-          window_, paneController_.EffectivePath(activePane_),
-          TerminalKind::PowerShell, false,
-          [this](const std::wstring &message, bool error) {
-            Notify(message, error);
-          });
-      break;
-    case IdPowerShellAdmin:
-      terminalController_.LaunchSelectedTerminal(
-          window_, paneController_.EffectivePath(activePane_),
-          TerminalKind::PowerShell, true,
-          [this](const std::wstring &message, bool error) {
-            Notify(message, error);
-          });
-      break;
-    case IdSearch:
-      if (commandController_.HasCommandInput(searchEdit_)) {
-        acceptCommandSuggestion((GetKeyState(VK_CONTROL) & 0x8000) != 0,
-                                (GetKeyState(VK_SHIFT) & 0x8000) != 0);
-      } else if (paneController_.IsSearchMode(activePane_) &&
-                 paneController_.IsBusy(activePane_)) {
-        paneController_.CancelSearch(activePane_, notify, searchState);
-      } else {
-        startSearch(activePane_, GetWindowTextString(searchEdit_));
-      }
-      break;
-    case IdCopy:
-      fileOperationController_.CopySelection(
-          window_, paneController_.SelectedPaths(activePane_), false, notify);
-      break;
-    case IdCut:
-      fileOperationController_.CopySelection(
-          window_, paneController_.SelectedPaths(activePane_), true, notify);
-      break;
-    case IdPaste:
-      fileOperationController_.Paste(
-          window_, paneController_.EffectivePath(activePane_), notify);
-      break;
-    case IdCopyToOther: {
-      fileOperationController_.TransferSelectionToOtherPane(
-          window_, paneController_.SelectedPaths(activePane_),
-          paneController_.EffectivePath(1 - activePane_), twoPanes_, false,
-          notify);
-      break;
-    }
-    case IdMoveToOther: {
-      fileOperationController_.TransferSelectionToOtherPane(
-          window_, paneController_.SelectedPaths(activePane_),
-          paneController_.EffectivePath(1 - activePane_), twoPanes_, true,
-          notify);
-      break;
-    }
-    case IdDelete:
-      fileOperationController_.DeleteSelection(
-          window_, paneController_.SelectedPaths(activePane_), false, notify);
-      break;
-    case IdPermanentDelete:
-      fileOperationController_.DeleteSelection(
-          window_, paneController_.SelectedPaths(activePane_), true, notify);
-      break;
-    case IdRename:
-      paneController_.BeginRename(activePane_);
-      break;
-    case IdNewFolder:
-      fileOperationController_.NewFolder(
-          window_, paneController_.EffectivePath(activePane_),
-          [this](const std::wstring &title, const std::wstring &label,
-                 const std::wstring &initial) {
-            return PromptText(title, label, initial);
-          },
-          notify);
-      break;
-    case IdProperties:
-      fileOperationController_.ShowSelectedProperties(
-          window_, paneController_.SelectedPaths(activePane_));
-      break;
-    case IdOpen:
-      openSelected(activePane_);
-      break;
-    case IdZipCreate:
-      zipController_.CreateZipFromSelection(
-          window_, paneController_.SelectedPaths(activePane_),
-          [this](const std::wstring &message, bool error) {
-            Notify(message, error);
-          });
-      break;
-    case IdZipExtract:
-      zipController_.ExtractSelectedZip(
-          window_, paneController_.SelectedPaths(activePane_),
-          [this](const std::wstring &message, bool error) {
-            Notify(message, error);
-          });
-      break;
-    case IdShowHidden:
-      paneController_.ToggleShowHidden(window_, activePane_, notify,
-                                       searchState);
-      break;
-    case IdFocusAddress:
-      SetFocus(paneController_.AddressHandle(activePane_));
-      SendMessageW(paneController_.AddressHandle(activePane_), EM_SETSEL, 0,
-                   -1);
-      break;
-    case IdFocusSearch:
-      SetFocus(searchEdit_);
-      SendMessageW(searchEdit_, EM_SETSEL, 0, -1);
-      break;
-    case IdSwitchPane:
-      if (twoPanes_) {
-        activePane_ = 1 - activePane_;
-        UpdateActivePaneVisuals();
-        const std::wstring query = paneController_.SearchQuery(activePane_);
-        SetWindowTextW(searchEdit_, paneController_.IsSearchMode(activePane_)
-                                        ? query.c_str()
-                                        : L"");
-        UpdatePaneSearchState(activePane_,
-                              paneController_.IsSearchMode(activePane_),
-                              paneController_.IsBusy(activePane_));
-        SetFocus(paneController_.ListHandle(activePane_));
-      }
-      break;
-    case IdRemoveSidebar:
-      sidebarController_.RemoveSidebarItem(sidebar_, settings_,
-                                           [this] { SaveSettings(); });
-      break;
-    case IdEditSidebar:
-      sidebarController_.EditSidebarItem(
-          window_, sidebar_, settings_,
-          [this](const std::wstring &title, const std::wstring &label,
-                 const std::wstring &initial) {
-            return PromptText(title, label, initial);
-          },
-          [this] { SaveSettings(); });
-      break;
-    case IdOpenSidebar:
-      sidebarController_.ActivateSidebarItem(
-          window_, sidebar_, settings_, false,
-          [&navigatePane, this](const std::wstring &path) {
-            navigatePane(activePane_, path);
-          },
-          [&launchRegisteredApplication](std::size_t index,
-                                         bool administrator) {
-            launchRegisteredApplication(index, administrator, true);
-          },
-          [this](const std::wstring &message, bool error) {
-            Notify(message, error);
-          });
-      break;
-    case IdOpenSidebarAdmin:
-      sidebarController_.ActivateSidebarItem(
-          window_, sidebar_, settings_, true,
-          [&navigatePane, this](const std::wstring &path) {
-            navigatePane(activePane_, path);
-          },
-          [&launchRegisteredApplication](std::size_t index,
-                                         bool administrator) {
-            launchRegisteredApplication(index, administrator, true);
-          },
-          [this](const std::wstring &message, bool error) {
-            Notify(message, error);
-          });
-      break;
-    case IdMoveSidebarUp:
-      sidebarController_.MoveSidebarItem(sidebar_, settings_, true,
-                                         [this] { SaveSettings(); });
-      break;
-    case IdMoveSidebarDown:
-      sidebarController_.MoveSidebarItem(sidebar_, settings_, false,
-                                         [this] { SaveSettings(); });
-      break;
-    }
-    PostMessageW(window_, kMessageRestoreFocus, 0, 0);
-    return 0;
   }
-  case WM_NOTIFY: {
-    const auto *header = reinterpret_cast<NMHDR *>(lParam);
-    const int paneIndex =
-        paneController_.PaneIndexFromControl(header->hwndFrom, activePane_);
-    if (header->hwndFrom == paneController_.ListHandle(paneIndex)) {
-      if (header->code == NM_SETFOCUS) {
-        activePane_ = paneIndex;
-        UpdateActivePaneVisuals();
-        const std::wstring query = paneController_.SearchQuery(activePane_);
-        SetWindowTextW(searchEdit_, paneController_.IsSearchMode(activePane_)
-                                        ? query.c_str()
-                                        : L"");
-        UpdatePaneSearchState(activePane_,
-                              paneController_.IsSearchMode(activePane_),
-                              paneController_.IsBusy(activePane_));
-        Notify(paneIndex == 0 ? L"左ペイン" : L"右ペイン");
-      } else if (header->code == NM_DBLCLK) {
-        activePane_ = paneIndex;
-        UpdateActivePaneVisuals();
-        openSelected(activePane_);
-      } else if (header->code == NM_RCLICK) {
-        activePane_ = paneIndex;
-        UpdateActivePaneVisuals();
-        const auto *click = reinterpret_cast<const NMITEMACTIVATE *>(lParam);
-        paneController_.SelectContextItem(paneIndex, click->iItem);
-        POINT point{};
-        GetCursorPos(&point);
-        shellMenuController_.ShowFileMenu(
-            window_, point, paneController_.SelectedPaths(activePane_),
-            paneController_.EffectivePath(activePane_),
-            paneController_.IsDriveView(activePane_), settings_, shellMenuIds,
-            [&refreshPane, this] { refreshPane(activePane_); },
-            [&openSelected, this] { openSelected(activePane_); },
-            [this] { paneController_.BeginRename(activePane_); },
-            [&launchRegisteredApplication](std::size_t index) {
-              launchRegisteredApplication(index, false, true);
-            });
-        PostMessageW(window_, kMessageRestoreFocus, 0, 0);
-      } else if (header->code == LVN_KEYDOWN) {
-        const auto *key = reinterpret_cast<NMLVKEYDOWN *>(lParam);
-        if (key->wVKey == VK_RETURN) {
-          activePane_ = paneIndex;
-          UpdateActivePaneVisuals();
-          openSelected(activePane_);
-        }
-      } else if (header->code == LVN_COLUMNCLICK) {
-        const auto *click = reinterpret_cast<NMLISTVIEW *>(lParam);
-        paneController_.HandleColumnClick(paneIndex, click->iSubItem);
-      } else if (header->code == LVN_GETDISPINFOW) {
-        auto *display = reinterpret_cast<NMLVDISPINFOW *>(lParam);
-        paneController_.PopulateDisplayInfo(paneIndex, *display);
-      } else if (header->code == LVN_ENDLABELEDITW) {
-        const auto *edit = reinterpret_cast<NMLVDISPINFOW *>(lParam);
-        if (edit->item.pszText != nullptr &&
-            fileOperationController_.RenameItem(
-                window_, paneController_.ItemPath(paneIndex, edit->item.iItem),
-                edit->item.pszText, notify)) {
-          return TRUE;
-        }
-      }
-    }
-    return 0;
-  }
+  case WM_COMMAND:
+    return HandleCommand(wParam, lParam);
+  case WM_NOTIFY:
+    return HandleNotify(lParam);
   case WM_CONTEXTMENU:
     if (reinterpret_cast<HWND>(wParam) == sidebar_) {
       sidebarController_.ShowContextMenu(
@@ -1690,104 +1394,6 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
       return 0;
     }
     break;
-  case kMessageCommandType:
-    return commandController_.HandleCommandPrefixCharacter(
-               searchEdit_, static_cast<wchar_t>(wParam),
-               reinterpret_cast<HWND>(lParam))
-               ? TRUE
-               : FALSE;
-  case kMessageCommandAccept: {
-    const bool control = (wParam & 1U) != 0;
-    const bool shift = (wParam & 2U) != 0;
-    acceptCommandSuggestion(control, shift);
-    return 0;
-  }
-  case kMessageCommandMove:
-    commandController_.MoveCommandSelection(
-        commandSuggestions_, static_cast<int>(static_cast<INT_PTR>(lParam)));
-    return 0;
-  case kMessageCommandDismiss:
-    commandController_.DismissCommandSuggestions(
-        searchEdit_, commandSuggestions_,
-        paneController_.ListHandle(activePane_), true);
-    return 0;
-  case kMessageCommandNew:
-    commandController_.AddCommandRegistration(
-        searchEdit_, commandSuggestions_,
-        [this] {
-          sidebarController_.AddBookmarkForPath(
-              sidebar_, settings_, paneController_.EffectivePath(activePane_),
-              [this](const std::wstring &title, const std::wstring &label,
-                     const std::wstring &initial) {
-                return PromptText(title, label, initial);
-              },
-              [this] { SaveSettings(); });
-        },
-        [this] {
-          sidebarController_.AddLink(
-              window_, sidebar_, settings_, true,
-              [this](const std::wstring &title, const std::wstring &label,
-                     const std::wstring &initial) {
-                return PromptText(title, label, initial);
-              },
-              [this] { SaveSettings(); });
-        },
-        [this](const std::wstring &message, bool error) {
-          Notify(message, error);
-        },
-        [this] {
-          commandController_.RebuildCommandSuggestions(
-              searchEdit_, commandSuggestions_, settings_,
-              paneController_.EffectivePath(activePane_),
-              [this](const std::wstring &message, bool error) {
-                Notify(message, error);
-              });
-        });
-    return 0;
-  case kMessageSidebarMove:
-    if (reinterpret_cast<HWND>(lParam) == sidebar_)
-      sidebarController_.MoveSidebarItem(sidebar_, settings_, wParam != 0,
-                                         [this] { SaveSettings(); });
-    return 0;
-  case kMessageRestoreFocus:
-    RestorePaneFocusIfNeeded();
-    return 0;
-  case kMessageNavigateAddress: {
-    const int paneIndex = static_cast<int>(wParam);
-    activePane_ = paneIndex;
-    UpdateActivePaneVisuals();
-    const std::wstring text =
-        GetWindowTextString(paneController_.AddressHandle(paneIndex));
-    if (_wcsicmp(text.c_str(), L"PC") == 0)
-      paneController_.ShowDrives(window_, paneIndex, true, notify, searchState);
-    else
-      navigatePane(paneIndex, text);
-    return 0;
-  }
-  case kMessageSearch:
-    startSearch(activePane_, GetWindowTextString(searchEdit_));
-    return 0;
-  case kMessageEnumerationBatch:
-    paneController_.HandleEnumerationBatch(lParam);
-    return 0;
-  case kMessageEnumerationDone:
-    paneController_.HandleEnumerationDone(lParam, notify, searchState);
-    return 0;
-  case kMessageOperationDone: {
-    fileOperationController_.HandleOperationDone(lParam, notify, refreshPane);
-    SetFocus(paneController_.ListHandle(activePane_));
-    return 0;
-  }
-  case kMessageZipDone: {
-    zipController_.HandleZipDone(
-        lParam, activePane_,
-        [this](const std::wstring &message, bool error) {
-          Notify(message, error);
-        },
-        refreshPane);
-    SetFocus(paneController_.ListHandle(activePane_));
-    return 0;
-  }
   case WM_CLOSE:
     if (fileOperationController_.PendingOperationCount() +
             zipController_.PendingOperationCount() >
@@ -1822,6 +1428,502 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
   }
   }
   return DefWindowProcW(window_, message, wParam, lParam);
+}
+
+LRESULT App::HandleCommand(WPARAM wParam, LPARAM) {
+  const auto notify = [this](const std::wstring &message, bool error) {
+    Notify(message, error);
+  };
+  const auto searchState = [this](int pane, bool searchMode, bool busy) {
+    UpdatePaneSearchState(pane, searchMode, busy);
+  };
+  const ShellMenuIds shellMenuIds{
+      IdAddFolderLink,  IdAddFileLink,  IdAddAppLink, IdPaste,
+      IdNewFolder,      IdOpen,         IdCopy,       IdCut,
+      IdRename,         IdDelete,       IdProperties, IdRegisteredAppBase,
+      IdShellMenuFirst, IdShellMenuLast};
+
+  const int command = LOWORD(wParam);
+  if (HIWORD(wParam) == LBN_DBLCLK && command == IdSidebar) {
+    sidebarController_.ActivateSidebarItem(
+        window_, sidebar_, settings_, false,
+        [this](const std::wstring &path) { NavigatePane(activePane_, path); },
+        [this](std::size_t index, bool administrator) {
+          LaunchRegisteredApplication(index, administrator, true);
+        },
+        [this](const std::wstring &message, bool error) {
+          Notify(message, error);
+        });
+    return 0;
+  }
+  if (HIWORD(wParam) == LBN_DBLCLK && command == IdCommandSuggestions) {
+    AcceptCommandSuggestion(false, false);
+    return 0;
+  }
+  if (HIWORD(wParam) == EN_CHANGE && command == IdSearchEdit) {
+    commandController_.RebuildCommandSuggestions(
+        searchEdit_, commandSuggestions_, settings_,
+        paneController_.EffectivePath(activePane_),
+        [this](const std::wstring &message, bool error) {
+          Notify(message, error);
+        });
+    return 0;
+  }
+  if (HIWORD(wParam) == EN_SETFOCUS &&
+      (command == IdLeftAddress || command == IdRightAddress)) {
+    commandController_.HideCommandSuggestions(commandSuggestions_);
+    activePane_ = command == IdLeftAddress ? 0 : 1;
+    UpdateActivePaneVisuals();
+  }
+  switch (command) {
+  case IdBack:
+    paneController_.NavigateHistory(window_, activePane_, -1, notify,
+                                    searchState);
+    break;
+  case IdForward:
+    paneController_.NavigateHistory(window_, activePane_, 1, notify,
+                                    searchState);
+    break;
+  case IdUp:
+    paneController_.NavigateUp(window_, activePane_, notify, searchState);
+    break;
+  case IdRefresh:
+    RefreshPaneView(activePane_);
+    break;
+  case IdDrives:
+    paneController_.ShowDrives(window_, activePane_, true, notify, searchState);
+    break;
+  case IdTogglePanes: {
+    twoPanes_ = !twoPanes_;
+    if (!twoPanes_ && activePane_ == 1)
+      activePane_ = 0;
+    UpdateActivePaneVisuals();
+    RECT client{};
+    GetClientRect(window_, &client);
+    LayoutControls(client.right, client.bottom);
+    break;
+  }
+  case IdToggleSidebar: {
+    sidebarVisible_ = !sidebarVisible_;
+    RECT client{};
+    GetClientRect(window_, &client);
+    LayoutControls(client.right, client.bottom);
+    break;
+  }
+  case IdAddBookmark:
+    sidebarController_.AddBookmarkForPath(
+        sidebar_, settings_, paneController_.EffectivePath(activePane_),
+        [this](const std::wstring &title, const std::wstring &label,
+               const std::wstring &initial) {
+          return PromptText(title, label, initial);
+        },
+        [this] { SaveSettings(); });
+    break;
+  case IdAddLink:
+    shellMenuController_.ShowLinkMenu(window_, toolbar_[4], shellMenuIds);
+    break;
+  case IdAddFolderLink:
+    sidebarController_.AddLinkedFolder(
+        window_, sidebar_, settings_,
+        [this](const std::wstring &title, const std::wstring &label,
+               const std::wstring &initial) {
+          return PromptText(title, label, initial);
+        },
+        [this] { SaveSettings(); });
+    break;
+  case IdAddFileLink:
+    sidebarController_.AddLink(
+        window_, sidebar_, settings_, false,
+        [this](const std::wstring &title, const std::wstring &label,
+               const std::wstring &initial) {
+          return PromptText(title, label, initial);
+        },
+        [this] { SaveSettings(); });
+    break;
+  case IdAddAppLink:
+    sidebarController_.AddLink(
+        window_, sidebar_, settings_, true,
+        [this](const std::wstring &title, const std::wstring &label,
+               const std::wstring &initial) {
+          return PromptText(title, label, initial);
+        },
+        [this] { SaveSettings(); });
+    break;
+  case IdTerminal:
+    terminalController_.ShowTerminalMenu(
+        window_, toolbar_[5], paneController_.HasPath(activePane_),
+        {IdCmd, IdCmdAdmin, IdPowerShell, IdPowerShellAdmin});
+    break;
+  case IdCmd:
+    terminalController_.LaunchSelectedTerminal(
+        window_, paneController_.EffectivePath(activePane_),
+        TerminalKind::CommandPrompt, false,
+        [this](const std::wstring &message, bool error) {
+          Notify(message, error);
+        });
+    break;
+  case IdCmdAdmin:
+    terminalController_.LaunchSelectedTerminal(
+        window_, paneController_.EffectivePath(activePane_),
+        TerminalKind::CommandPrompt, true,
+        [this](const std::wstring &message, bool error) {
+          Notify(message, error);
+        });
+    break;
+  case IdPowerShell:
+    terminalController_.LaunchSelectedTerminal(
+        window_, paneController_.EffectivePath(activePane_),
+        TerminalKind::PowerShell, false,
+        [this](const std::wstring &message, bool error) {
+          Notify(message, error);
+        });
+    break;
+  case IdPowerShellAdmin:
+    terminalController_.LaunchSelectedTerminal(
+        window_, paneController_.EffectivePath(activePane_),
+        TerminalKind::PowerShell, true,
+        [this](const std::wstring &message, bool error) {
+          Notify(message, error);
+        });
+    break;
+  case IdSearch:
+    if (commandController_.HasCommandInput(searchEdit_)) {
+      AcceptCommandSuggestion((GetKeyState(VK_CONTROL) & 0x8000) != 0,
+                              (GetKeyState(VK_SHIFT) & 0x8000) != 0);
+    } else if (paneController_.IsSearchMode(activePane_) &&
+               paneController_.IsBusy(activePane_)) {
+      paneController_.CancelSearch(activePane_, notify, searchState);
+    } else {
+      StartPaneSearch(activePane_, GetWindowTextString(searchEdit_));
+    }
+    break;
+  case IdCopy:
+    fileOperationController_.CopySelection(
+        window_, paneController_.SelectedPaths(activePane_), false, notify);
+    break;
+  case IdCut:
+    fileOperationController_.CopySelection(
+        window_, paneController_.SelectedPaths(activePane_), true, notify);
+    break;
+  case IdPaste:
+    fileOperationController_.Paste(
+        window_, paneController_.EffectivePath(activePane_), notify);
+    break;
+  case IdCopyToOther: {
+    fileOperationController_.TransferSelectionToOtherPane(
+        window_, paneController_.SelectedPaths(activePane_),
+        paneController_.EffectivePath(1 - activePane_), twoPanes_, false,
+        notify);
+    break;
+  }
+  case IdMoveToOther: {
+    fileOperationController_.TransferSelectionToOtherPane(
+        window_, paneController_.SelectedPaths(activePane_),
+        paneController_.EffectivePath(1 - activePane_), twoPanes_, true,
+        notify);
+    break;
+  }
+  case IdDelete:
+    fileOperationController_.DeleteSelection(
+        window_, paneController_.SelectedPaths(activePane_), false, notify);
+    break;
+  case IdPermanentDelete:
+    fileOperationController_.DeleteSelection(
+        window_, paneController_.SelectedPaths(activePane_), true, notify);
+    break;
+  case IdRename:
+    paneController_.BeginRename(activePane_);
+    break;
+  case IdNewFolder:
+    fileOperationController_.NewFolder(
+        window_, paneController_.EffectivePath(activePane_),
+        [this](const std::wstring &title, const std::wstring &label,
+               const std::wstring &initial) {
+          return PromptText(title, label, initial);
+        },
+        notify);
+    break;
+  case IdProperties:
+    fileOperationController_.ShowSelectedProperties(
+        window_, paneController_.SelectedPaths(activePane_));
+    break;
+  case IdOpen:
+    OpenPaneSelection(activePane_);
+    break;
+  case IdZipCreate:
+    zipController_.CreateZipFromSelection(
+        window_, paneController_.SelectedPaths(activePane_),
+        [this](const std::wstring &message, bool error) {
+          Notify(message, error);
+        });
+    break;
+  case IdZipExtract:
+    zipController_.ExtractSelectedZip(
+        window_, paneController_.SelectedPaths(activePane_),
+        [this](const std::wstring &message, bool error) {
+          Notify(message, error);
+        });
+    break;
+  case IdShowHidden:
+    paneController_.ToggleShowHidden(window_, activePane_, notify, searchState);
+    break;
+  case IdFocusAddress:
+    SetFocus(paneController_.AddressHandle(activePane_));
+    SendMessageW(paneController_.AddressHandle(activePane_), EM_SETSEL, 0, -1);
+    break;
+  case IdFocusSearch:
+    SetFocus(searchEdit_);
+    SendMessageW(searchEdit_, EM_SETSEL, 0, -1);
+    break;
+  case IdSwitchPane:
+    if (twoPanes_) {
+      activePane_ = 1 - activePane_;
+      UpdateActivePaneVisuals();
+      const std::wstring query = paneController_.SearchQuery(activePane_);
+      SetWindowTextW(searchEdit_, paneController_.IsSearchMode(activePane_)
+                                      ? query.c_str()
+                                      : L"");
+      UpdatePaneSearchState(activePane_,
+                            paneController_.IsSearchMode(activePane_),
+                            paneController_.IsBusy(activePane_));
+      SetFocus(paneController_.ListHandle(activePane_));
+    }
+    break;
+  case IdRemoveSidebar:
+    sidebarController_.RemoveSidebarItem(sidebar_, settings_,
+                                         [this] { SaveSettings(); });
+    break;
+  case IdEditSidebar:
+    sidebarController_.EditSidebarItem(
+        window_, sidebar_, settings_,
+        [this](const std::wstring &title, const std::wstring &label,
+               const std::wstring &initial) {
+          return PromptText(title, label, initial);
+        },
+        [this] { SaveSettings(); });
+    break;
+  case IdOpenSidebar:
+    sidebarController_.ActivateSidebarItem(
+        window_, sidebar_, settings_, false,
+        [this](const std::wstring &path) { NavigatePane(activePane_, path); },
+        [this](std::size_t index, bool administrator) {
+          LaunchRegisteredApplication(index, administrator, true);
+        },
+        [this](const std::wstring &message, bool error) {
+          Notify(message, error);
+        });
+    break;
+  case IdOpenSidebarAdmin:
+    sidebarController_.ActivateSidebarItem(
+        window_, sidebar_, settings_, true,
+        [this](const std::wstring &path) { NavigatePane(activePane_, path); },
+        [this](std::size_t index, bool administrator) {
+          LaunchRegisteredApplication(index, administrator, true);
+        },
+        [this](const std::wstring &message, bool error) {
+          Notify(message, error);
+        });
+    break;
+  case IdMoveSidebarUp:
+    sidebarController_.MoveSidebarItem(sidebar_, settings_, true,
+                                       [this] { SaveSettings(); });
+    break;
+  case IdMoveSidebarDown:
+    sidebarController_.MoveSidebarItem(sidebar_, settings_, false,
+                                       [this] { SaveSettings(); });
+    break;
+  }
+  PostMessageW(window_, kMessageRestoreFocus, 0, 0);
+  return 0;
+}
+
+LRESULT App::HandleNotify(LPARAM lParam) {
+  const auto *header = reinterpret_cast<NMHDR *>(lParam);
+  const int paneIndex =
+      paneController_.PaneIndexFromControl(header->hwndFrom, activePane_);
+  if (header->hwndFrom != paneController_.ListHandle(paneIndex))
+    return 0;
+
+  if (header->code == NM_SETFOCUS) {
+    activePane_ = paneIndex;
+    UpdateActivePaneVisuals();
+    const std::wstring query = paneController_.SearchQuery(activePane_);
+    SetWindowTextW(searchEdit_, paneController_.IsSearchMode(activePane_)
+                                    ? query.c_str()
+                                    : L"");
+    UpdatePaneSearchState(activePane_,
+                          paneController_.IsSearchMode(activePane_),
+                          paneController_.IsBusy(activePane_));
+    Notify(paneIndex == 0 ? L"左ペイン" : L"右ペイン");
+  } else if (header->code == NM_DBLCLK) {
+    activePane_ = paneIndex;
+    UpdateActivePaneVisuals();
+    OpenPaneSelection(activePane_);
+  } else if (header->code == NM_RCLICK) {
+    activePane_ = paneIndex;
+    UpdateActivePaneVisuals();
+    const auto *click = reinterpret_cast<const NMITEMACTIVATE *>(lParam);
+    paneController_.SelectContextItem(paneIndex, click->iItem);
+    POINT point{};
+    GetCursorPos(&point);
+    const ShellMenuIds shellMenuIds{
+        IdAddFolderLink,  IdAddFileLink,  IdAddAppLink, IdPaste,
+        IdNewFolder,      IdOpen,         IdCopy,       IdCut,
+        IdRename,         IdDelete,       IdProperties, IdRegisteredAppBase,
+        IdShellMenuFirst, IdShellMenuLast};
+    shellMenuController_.ShowFileMenu(
+        window_, point, paneController_.SelectedPaths(activePane_),
+        paneController_.EffectivePath(activePane_),
+        paneController_.IsDriveView(activePane_), settings_, shellMenuIds,
+        [this] { RefreshPaneView(activePane_); },
+        [this] { OpenPaneSelection(activePane_); },
+        [this] { paneController_.BeginRename(activePane_); },
+        [this](std::size_t index) {
+          LaunchRegisteredApplication(index, false, true);
+        });
+    PostMessageW(window_, kMessageRestoreFocus, 0, 0);
+  } else if (header->code == LVN_KEYDOWN) {
+    const auto *key = reinterpret_cast<NMLVKEYDOWN *>(lParam);
+    if (key->wVKey == VK_RETURN) {
+      activePane_ = paneIndex;
+      UpdateActivePaneVisuals();
+      OpenPaneSelection(activePane_);
+    }
+  } else if (header->code == LVN_COLUMNCLICK) {
+    const auto *click = reinterpret_cast<NMLISTVIEW *>(lParam);
+    paneController_.HandleColumnClick(paneIndex, click->iSubItem);
+  } else if (header->code == LVN_GETDISPINFOW) {
+    auto *display = reinterpret_cast<NMLVDISPINFOW *>(lParam);
+    paneController_.PopulateDisplayInfo(paneIndex, *display);
+  } else if (header->code == LVN_ENDLABELEDITW) {
+    const auto *edit = reinterpret_cast<NMLVDISPINFOW *>(lParam);
+    if (edit->item.pszText != nullptr &&
+        fileOperationController_.RenameItem(
+            window_, paneController_.ItemPath(paneIndex, edit->item.iItem),
+            edit->item.pszText,
+            [this](const std::wstring &message, bool error) {
+              Notify(message, error);
+            })) {
+      return TRUE;
+    }
+  }
+  return 0;
+}
+
+bool App::HandleAppMessage(UINT message, WPARAM wParam, LPARAM lParam,
+                           LRESULT &result) {
+  const auto notify = [this](const std::wstring &text, bool error) {
+    Notify(text, error);
+  };
+  const auto searchState = [this](int pane, bool searchMode, bool busy) {
+    UpdatePaneSearchState(pane, searchMode, busy);
+  };
+  switch (message) {
+  case kMessageCommandType:
+    result = commandController_.HandleCommandPrefixCharacter(
+                 searchEdit_, static_cast<wchar_t>(wParam),
+                 reinterpret_cast<HWND>(lParam))
+                 ? TRUE
+                 : FALSE;
+    return true;
+  case kMessageCommandAccept:
+    AcceptCommandSuggestion((wParam & 1U) != 0, (wParam & 2U) != 0);
+    result = 0;
+    return true;
+  case kMessageCommandMove:
+    commandController_.MoveCommandSelection(
+        commandSuggestions_, static_cast<int>(static_cast<INT_PTR>(lParam)));
+    result = 0;
+    return true;
+  case kMessageCommandDismiss:
+    commandController_.DismissCommandSuggestions(
+        searchEdit_, commandSuggestions_,
+        paneController_.ListHandle(activePane_), true);
+    result = 0;
+    return true;
+  case kMessageCommandNew:
+    commandController_.AddCommandRegistration(
+        searchEdit_, commandSuggestions_,
+        [this] {
+          sidebarController_.AddBookmarkForPath(
+              sidebar_, settings_, paneController_.EffectivePath(activePane_),
+              [this](const std::wstring &title, const std::wstring &label,
+                     const std::wstring &initial) {
+                return PromptText(title, label, initial);
+              },
+              [this] { SaveSettings(); });
+        },
+        [this] {
+          sidebarController_.AddLink(
+              window_, sidebar_, settings_, true,
+              [this](const std::wstring &title, const std::wstring &label,
+                     const std::wstring &initial) {
+                return PromptText(title, label, initial);
+              },
+              [this] { SaveSettings(); });
+        },
+        notify,
+        [this] {
+          commandController_.RebuildCommandSuggestions(
+              searchEdit_, commandSuggestions_, settings_,
+              paneController_.EffectivePath(activePane_),
+              [this](const std::wstring &text, bool error) {
+                Notify(text, error);
+              });
+        });
+    result = 0;
+    return true;
+  case kMessageSidebarMove:
+    if (reinterpret_cast<HWND>(lParam) == sidebar_)
+      sidebarController_.MoveSidebarItem(sidebar_, settings_, wParam != 0,
+                                         [this] { SaveSettings(); });
+    result = 0;
+    return true;
+  case kMessageRestoreFocus:
+    RestorePaneFocusIfNeeded();
+    result = 0;
+    return true;
+  case kMessageNavigateAddress: {
+    const int pane = static_cast<int>(wParam);
+    activePane_ = pane;
+    UpdateActivePaneVisuals();
+    const std::wstring text =
+        GetWindowTextString(paneController_.AddressHandle(pane));
+    if (_wcsicmp(text.c_str(), L"PC") == 0) {
+      paneController_.ShowDrives(window_, pane, true, notify, searchState);
+    } else {
+      NavigatePane(pane, text);
+    }
+    result = 0;
+    return true;
+  }
+  case kMessageSearch:
+    StartPaneSearch(activePane_, GetWindowTextString(searchEdit_));
+    result = 0;
+    return true;
+  case kMessageEnumerationBatch:
+    paneController_.HandleEnumerationBatch(lParam);
+    result = 0;
+    return true;
+  case kMessageEnumerationDone:
+    paneController_.HandleEnumerationDone(lParam, notify, searchState);
+    result = 0;
+    return true;
+  case kMessageOperationDone:
+    fileOperationController_.HandleOperationDone(
+        lParam, notify, [this](int pane) { RefreshPaneView(pane); });
+    SetFocus(paneController_.ListHandle(activePane_));
+    result = 0;
+    return true;
+  case kMessageZipDone:
+    zipController_.HandleZipDone(lParam, activePane_, notify,
+                                 [this](int pane) { RefreshPaneView(pane); });
+    SetFocus(paneController_.ListHandle(activePane_));
+    result = 0;
+    return true;
+  default:
+    return false;
+  }
 }
 
 } // namespace sf::win

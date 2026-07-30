@@ -11,6 +11,7 @@
 
 #include <windows.h>
 
+#include <cstddef>
 #include <filesystem>
 #include <string>
 
@@ -42,10 +43,28 @@ private:
   void VerifySettingsWritable();
   void SaveSettings();
 
+  void NavigatePane(int pane, const std::wstring &path, bool addHistory = true);
+  void RefreshPaneView(int pane);
+  void StartPaneSearch(int pane, const std::wstring &query);
+  void OpenPaneSelection(int pane);
+  void LaunchRegisteredApplication(std::size_t index, bool administrator,
+                                   bool passSelection);
+  void AcceptCommandSuggestion(bool control, bool shift);
+
   void ShowAboutDialog();
 
   [[nodiscard]] AppArgumentContext
   BuildAppArgumentContext(bool includeSelection) const;
+  [[nodiscard]] bool HandleOwnerDraw(WPARAM wParam, LPARAM lParam,
+                                     LRESULT &result);
+  [[nodiscard]] bool HandleControlColor(UINT message, WPARAM wParam,
+                                        LPARAM lParam, LRESULT &result);
+  [[nodiscard]] bool HandleSplitterMessage(UINT message, WPARAM wParam,
+                                           LPARAM lParam, LRESULT &result);
+  LRESULT HandleCommand(WPARAM wParam, LPARAM lParam);
+  LRESULT HandleNotify(LPARAM lParam);
+  [[nodiscard]] bool HandleAppMessage(UINT message, WPARAM wParam,
+                                      LPARAM lParam, LRESULT &result);
   [[nodiscard]] std::wstring PromptText(const std::wstring &title,
                                         const std::wstring &label,
                                         const std::wstring &initial = {}) const;
