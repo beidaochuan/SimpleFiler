@@ -72,6 +72,8 @@ if(WIN32)
         src/win/App.cpp
         src/win/CommandController.cpp
         src/win/FileEnumerator.cpp
+        src/win/FileOperationController.cpp
+        src/win/PaneController.cpp
         src/win/SidebarController.cpp
         src/win/ShellMenuController.cpp
         src/win/ShellOperations.cpp

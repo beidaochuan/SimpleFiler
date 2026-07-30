@@ -2,20 +2,17 @@
 
 #include "core/Settings.h"
 #include "win/CommandController.h"
-#include "win/FileEnumerator.h"
-#include "win/SidebarController.h"
+#include "win/FileOperationController.h"
+#include "win/PaneController.h"
 #include "win/ShellMenuController.h"
+#include "win/SidebarController.h"
 #include "win/TerminalController.h"
 #include "win/ZipController.h"
 
 #include <windows.h>
 
-#include <cstdint>
 #include <filesystem>
-#include <memory>
 #include <string>
-#include <thread>
-#include <vector>
 
 namespace sf::win {
 
@@ -27,31 +24,6 @@ public:
   int Run(int showCommand, const std::wstring &initialPath);
 
 private:
-  struct Pane final {
-    struct RetiredWorker final {
-      std::uint64_t generation = 0;
-      std::unique_ptr<std::jthread> thread;
-    };
-
-    HWND address = nullptr;
-    HWND list = nullptr;
-    std::wstring path;
-    std::wstring searchRoot;
-    std::wstring searchQuery;
-    bool driveView = false;
-    bool searchMode = false;
-    bool busy = false;
-    bool showHidden = false;
-    int sortColumn = 0;
-    bool sortAscending = true;
-    std::vector<std::wstring> history;
-    std::size_t historyIndex = 0;
-    std::vector<FileItem> items;
-    std::uint64_t generation = 0;
-    std::unique_ptr<std::jthread> worker;
-    std::vector<RetiredWorker> retiredWorkers;
-  };
-
   static LRESULT CALLBACK WindowProcedure(HWND window, UINT message,
                                           WPARAM wParam, LPARAM lParam);
   LRESULT HandleMessage(UINT message, WPARAM wParam, LPARAM lParam);
@@ -63,36 +35,17 @@ private:
   void LayoutControls(int width, int height);
   void ApplyDpi(UINT dpi);
   void UpdateActivePaneVisuals();
+  void UpdatePaneSearchState(int pane, bool searchMode, bool busy);
   void RestorePaneFocusIfNeeded();
   void CreateAccelerators();
   void InitializeFromSettings(const std::wstring &initialPath);
   void VerifySettingsWritable();
   void SaveSettings();
 
-  void Navigate(int pane, const std::wstring &path, bool addHistory = true);
-  void NavigateHistory(int delta);
-  void NavigateUp();
-  void ShowDrives(int pane, bool addHistory = true);
-  void RefreshPane(int pane);
-  void StartSearch(const std::wstring &query);
-  void SortPane(int pane);
-  void RetireWorker(Pane &pane);
-  void FinishWorker(Pane &pane, std::uint64_t generation);
-  void OpenSelected();
-  void BeginRename();
-  void CopySelection(bool cut);
-  void TransferSelectionToOtherPane(bool move);
-  void Paste();
-  void DeleteSelection(bool permanent);
-  void NewFolder();
-  void ShowSelectedProperties();
   void ShowAboutDialog();
 
-  [[nodiscard]] std::vector<std::wstring> SelectedPaths() const;
-  [[nodiscard]] std::wstring ActivePaneEffectivePath() const;
   [[nodiscard]] AppArgumentContext
   BuildAppArgumentContext(bool includeSelection) const;
-  [[nodiscard]] int PaneIndexFromControl(HWND control) const;
   [[nodiscard]] std::wstring PromptText(const std::wstring &title,
                                         const std::wstring &label,
                                         const std::wstring &initial = {}) const;
@@ -116,14 +69,14 @@ private:
   UINT dpi_ = USER_DEFAULT_SCREEN_DPI;
   RECT sidebarCardRect_{};
   RECT paneCardRects_[2]{};
-  Pane panes_[2];
   int activePane_ = 0;
   bool twoPanes_ = true;
   bool sidebarVisible_ = true;
   bool draggingSplitter_ = false;
   bool settingsWritable_ = true;
-  std::size_t pendingFileOperations_ = 0;
   CommandController commandController_;
+  FileOperationController fileOperationController_;
+  PaneController paneController_;
   SidebarController sidebarController_;
   ShellMenuController shellMenuController_;
   ZipController zipController_;

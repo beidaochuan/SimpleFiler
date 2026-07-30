@@ -453,13 +453,19 @@ Windows x64 Releaseビルドと全CTest（UIスモークを含む6件）の通�
 
 ## Phase 5以降
 
-### Phase 5: PaneController / FileOperationController の切り出し（次回実装対象・詳細計画）
+### Phase 5: PaneController / FileOperationController の切り出し（実装済み）
 
 Phase 4完了後の`App`を再調査した。ナビゲーションだけを移しても、非同期列挙結果、
 仮想リスト表示、選択復元、検索中止、設定の読み書きが`Pane`の内部状態を直接更新するため、
 `Pane`の所有権が`App`に残ってしまう。一方、コピー・移動・削除などはペイン状態そのものを
 所有する必要はなく、操作開始数と完了通知だけが共通状態である。このためPhase 5では
 `PaneController`と`FileOperationController`に分ける。
+
+実装日: 2026-07-30。`Pane`、worker寿命、ナビゲーション、検索、ソート、
+仮想リスト表示と列挙完了処理を`PaneController`へ移し、ファイル操作と進行中件数を
+`FileOperationController`へ移した。`App`から`Pane`・worker・`FileItem`への直接参照を
+削除し、既存の全コントローラーを値とコールバックで接続した。
+Windows x64 Releaseビルドと全CTest（UIスモークを含む6件）の通過を確認済み。
 
 #### PaneControllerの対象と所有状態
 
@@ -474,7 +480,7 @@ Phase 4完了後の`App`を再調査した。ナビゲーションだけを移�
   `AttachControls(pane, address, list)`で非所有参照として登録する。
 - `AddressHandle`、`ListHandle`、`PaneIndexFromControl`の小さなアクセサーを公開し、
   `App`のレイアウト、DPI、フォーカス処理は引き続きハンドルだけを扱う。
-- `ApplyPaneSettings`/`WritePaneSettings`で`showHidden`・ソート・現在パスを受け渡しし、
+- `ApplySettings`/`WriteSettings`で`showHidden`・ソート・現在パスを受け渡しし、
   `App`から内部状態への直接アクセスをなくす。
 
 #### 列挙・検索・リスト通知
@@ -554,12 +560,86 @@ Phase 4完了後の`App`を再調査した。ナビゲーションだけを移�
    操作中終了警告。
 7. Windows x64 Releaseビルドと全CTest（UIスモークを含む）。
 
-### Phase 6: ウィンドウ管理・メッセージループの整理（最終仕上げ）
+### Phase 6: ウィンドウ管理・メッセージループの整理（次回実装対象・詳細計画）
 
-- 残った`App`は「ウィンドウ生成・レイアウト・DPI・メッセージルーティング」の
-  コーディネーターとして再整理する。`HandleMessage`の巨大switchは、各Phaseで
-  切り出したコントローラーへの委譲行が中心になっているはずなので、可読性を
-  再確認する。
+Phase 5完了後の`App`には、ウィンドウ/コントロールの生成と配置、DPI・描画、
+アクティブペインとフォーカス、設定保存、ダイアログ、各コントローラー間の接続が残った。
+これらはアプリケーションシェルとして妥当だが、`HandleMessage`は約800行あり、
+メッセージ種別ごとの境界が不明瞭である。最終Phaseでは新しい機能コントローラーを
+増やさず、`App`内部のルーティングを責務別のprivateハンドラーへ整理する。
+
+#### 残す責務
+
+- `RegisterClasses`, `CreateMainWindow`, `CreateControls`,
+  `CreatePaneControls`, `LayoutControls`, `ApplyDpi`
+- `UpdateActivePaneVisuals`, `UpdatePaneSearchState`,
+  `RestorePaneFocusIfNeeded`, `CreateAccelerators`
+- `InitializeFromSettings`, `VerifySettingsWritable`, `SaveSettings`
+- `PromptText`, `ShowAboutDialog`, `Notify`, `BuildAppArgumentContext`
+- `activePane_`, 2ペイン/サイドバー表示、splitter、フォント・ブラシ・各`HWND`
+- `WindowProcedure`と最上位の`HandleMessage`
+
+これらは複数コントローラーを調停するか、トップレベルウィンドウの寿命に属するため、
+別クラスへ移しても依存が循環するだけである。
+
+#### HandleMessageの分割
+
+- `HandleCommand(WPARAM, LPARAM)`:
+  `WM_COMMAND`の事前処理と`ControlId`別のコントローラー呼び出しを担当する。
+- `HandleNotify(LPARAM)`:
+  ペインのフォーカス/右クリック/キー/列/表示/rename通知を担当する。
+- `HandleOwnerDraw(WPARAM, LPARAM, LRESULT&)`:
+  ツールバーボタンとサイドバーのowner-drawを担当し、未処理なら
+  `ShellMenuController::HandleMenuMessage`へ戻せる形にする。
+- `HandleControlColor(UINT, WPARAM, LPARAM, LRESULT&)`:
+  edit/list/staticの色処理をまとめる。
+- `HandleSplitterMessage(UINT, WPARAM, LPARAM, LRESULT&)`:
+  drag開始・移動・終了とカーソル変更をまとめる。
+- `HandleAppMessage(UINT, WPARAM, LPARAM, LRESULT&)`:
+  `kMessageCommand*`、サイドバー移動、フォーカス復元、アドレス確定、検索、
+  列挙/ファイル操作/ZIP完了をまとめる。
+- 各ハンドラーは処理したかを`bool`で返し、必要な戻り値を`LRESULT&`へ設定する。
+  `HandleMessage`はWindows標準メッセージの最上位ルーティングと
+  `DefWindowProcW`へのフォールバックだけを残す。
+
+#### コールバックと依存方向
+
+- 現在`HandleMessage`先頭で全メッセージについて生成している通知、検索状態、
+  ナビゲーション、更新、選択を開く各ラムダは、必要なハンドラー内だけで生成する。
+- 共通化が必要な場合も`App&`を渡すコンテキスト構造体は作らず、privateメソッドか
+  小さなラムダに留める。
+- `ControlId`と`kMessage*`は現在のファイルに残す。共有enumの新設は行わない。
+- コントローラー同士を直接参照させず、引き続き`App`が値とコールバックを接続する。
+- シェルメニュー表示中の`WM_DRAWITEM`/`WM_MENUCHAR`等の転送順序、
+  owner-drawの戻り値、`PostMessageW(kMessageRestoreFocus)`のタイミングを維持する。
+
+#### 整理対象
+
+- `App.cpp`の不要includeと、移管後に不要になった匿名namespaceヘルパーを再確認する。
+- `App.h`のメソッドとメンバーを「window resources / UI state /
+  controllers / settings」の順に並べる。
+- 既存の文字列、コマンドID、アクセラレーター、フォーカス動作は変更しない。
+- 完了条件として`HandleMessage`の各caseが短い委譲かトップレベル処理になり、
+  `App`にファイル操作・ペイン内部状態・各機能固有状態が戻っていないことを確認する。
+
+#### 実装順序
+
+1. owner-draw、色、splitterの純粋なUI分岐をprivateハンドラーへ移す。
+2. `WM_NOTIFY`を`HandleNotify`へ移し、ペイン通知の戻り値を保持する。
+3. `WM_COMMAND`を`HandleCommand`へ移し、既存コントローラー接続を保持する。
+4. `kMessage*`を`HandleAppMessage`へ移す。
+5. `HandleMessage`先頭のラムダを必要なハンドラーへ局所化し、
+   標準メッセージとシェルメニュー転送を整理する。
+6. 不要include・宣言を削除し、差分レビューと全体検証を行う。
+
+#### 検証
+
+1. 起動、リサイズ、最大化、DPI変更、サイドバー/2ペイン切替、splitter操作。
+2. ツールバーボタン、サイドバー、アクティブペインのowner-drawと色。
+3. キーボードアクセラレーター、アドレス/検索フォーカス、フォーカス復元。
+4. コマンドパレット、シェルメニュー、各非同期完了メッセージの戻り値と転送。
+5. 設定保存、終了時の進行中操作警告、About/入力ダイアログ。
+6. Windows x64 Releaseビルドと全CTest（UIスモークを含む）。
 
 ## 進行管理
 
