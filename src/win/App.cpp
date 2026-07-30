@@ -789,6 +789,15 @@ void App::LayoutControls(int width, int height) {
   MoveWindow(status_, gap + scale(4), height - statusHeight + scale(5),
              std::max(0, width - gap * 2 - scale(8)),
              statusHeight - scale(5), TRUE);
+  // MoveWindow's own repaint only invalidates the delta between the old and
+  // new rect, not the whole client area. LVS_EX_DOUBLEBUFFER caches a
+  // full-client offscreen bitmap, so a partial invalidate leaves stale
+  // glyphs from the previous width composited into the new layout (seen as
+  // truncated/overlapping file names after toggling the sidebar). Forcing a
+  // full-rect invalidate here fixes it for every caller of LayoutControls
+  // (WM_SIZE, WM_DPICHANGED, splitter drag, pane/sidebar toggle).
+  InvalidateRect(panes_[0].list, nullptr, TRUE);
+  InvalidateRect(panes_[1].list, nullptr, TRUE);
   InvalidateRect(window_, nullptr, TRUE);
 }
 
