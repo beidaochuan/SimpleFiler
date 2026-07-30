@@ -4,9 +4,7 @@
 #include "core/PortablePath.h"
 #include "win/AppMessages.h"
 #include "win/ShellOperations.h"
-#include "win/TerminalLauncher.h"
 #include "win/WinUtils.h"
-#include "win/ZipOperations.h"
 
 #include <commctrl.h>
 #include <commdlg.h>
@@ -356,38 +354,6 @@ std::wstring LeafName(const std::wstring &path) {
   std::filesystem::path value(path);
   if (!value.filename().empty())
     return value.filename().wstring();
-  return path;
-}
-
-bool HasZipExtension(const std::wstring &path) {
-  const wchar_t *extension = PathFindExtensionW(path.c_str());
-  return extension != nullptr && _wcsicmp(extension, L".zip") == 0;
-}
-
-std::wstring PickFolder(HWND owner, const wchar_t *title) {
-  IFileOpenDialog *dialog = nullptr;
-  if (FAILED(CoCreateInstance(CLSID_FileOpenDialog, nullptr,
-                              CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&dialog)))) {
-    return {};
-  }
-  FILEOPENDIALOGOPTIONS options{};
-  dialog->GetOptions(&options);
-  dialog->SetOptions(options | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM |
-                     FOS_PATHMUSTEXIST);
-  dialog->SetTitle(title);
-  std::wstring path;
-  if (SUCCEEDED(dialog->Show(owner))) {
-    IShellItem *item = nullptr;
-    if (SUCCEEDED(dialog->GetResult(&item))) {
-      PWSTR rawPath = nullptr;
-      if (SUCCEEDED(item->GetDisplayName(SIGDN_FILESYSPATH, &rawPath))) {
-        path = rawPath;
-        CoTaskMemFree(rawPath);
-      }
-      item->Release();
-    }
-  }
-  dialog->Release();
   return path;
 }
 
@@ -1317,6 +1283,11 @@ std::vector<std::wstring> App::SelectedPaths() const {
   return paths;
 }
 
+std::wstring App::ActivePaneEffectivePath() const {
+  const Pane &pane = panes_[activePane_];
+  return pane.searchMode ? pane.searchRoot : pane.path;
+}
+
 void App::OpenSelected() {
   Pane &pane = panes_[activePane_];
   const int index = ListView_GetNextItem(pane.list, -1, LVNI_SELECTED);
@@ -1657,41 +1628,6 @@ void App::MoveSidebarItem(bool up) {
                up ? selected - 1 : selected + 1, 0);
 }
 
-void App::ShowTerminalMenu(HWND sourceButton) {
-  HMENU menu = CreatePopupMenu();
-  AppendMenuW(menu, MF_STRING, IdCmd, L"CMDをここで開く");
-  AppendMenuW(menu, MF_STRING, IdCmdAdmin, L"管理者としてCMDをここで開く");
-  AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-  AppendMenuW(menu, MF_STRING, IdPowerShell, L"PowerShellをここで開く");
-  AppendMenuW(menu, MF_STRING, IdPowerShellAdmin,
-              L"管理者としてPowerShellをここで開く");
-  const Pane &pane = panes_[activePane_];
-  if (pane.path.empty()) {
-    EnableMenuItem(menu, IdCmd, MF_BYCOMMAND | MF_GRAYED);
-    EnableMenuItem(menu, IdCmdAdmin, MF_BYCOMMAND | MF_GRAYED);
-    EnableMenuItem(menu, IdPowerShell, MF_BYCOMMAND | MF_GRAYED);
-    EnableMenuItem(menu, IdPowerShellAdmin, MF_BYCOMMAND | MF_GRAYED);
-  }
-  RECT rectangle{};
-  GetWindowRect(sourceButton, &rectangle);
-  TrackPopupMenu(menu, TPM_LEFTALIGN | TPM_TOPALIGN, rectangle.left,
-                 rectangle.bottom, 0, window_, nullptr);
-  DestroyMenu(menu);
-}
-
-void App::LaunchSelectedTerminal(TerminalKind kind, bool administrator) {
-  const Pane &pane = panes_[activePane_];
-  const std::wstring directory = pane.searchMode ? pane.searchRoot : pane.path;
-  const TerminalLaunchResult result =
-      LaunchTerminal(window_, directory, kind, administrator);
-  if (result.launched || result.cancelled) {
-    if (result.cancelled)
-      Notify(L"管理者起動をキャンセルしました");
-    return;
-  }
-  Notify(L"端末を起動できません: " + WindowsErrorMessage(result.error), true);
-}
-
 void App::RebuildCommandSuggestions() {
   const CommandQuery command =
       ParseCommandQuery(GetWindowTextString(searchEdit_));
@@ -1849,8 +1785,12 @@ void App::AcceptCommandSuggestion(bool control, bool shift) {
     LaunchRegisteredApplication(suggestion.sourceIndex, control, !shift);
     break;
   case CommandSuggestionKind::Terminal:
-    LaunchSelectedTerminal(TerminalKind::CommandPrompt,
-                           suggestion.administrator);
+    terminalController_.LaunchSelectedTerminal(
+        window_, ActivePaneEffectivePath(),
+        TerminalKind::CommandPrompt, suggestion.administrator,
+        [this](const std::wstring &message, bool error) {
+          Notify(message, error);
+        });
     break;
   }
 }
@@ -2316,55 +2256,6 @@ void App::ShowFileMenu(POINT point) {
   }
 }
 
-void App::CreateZipFromSelection() {
-  const auto paths = SelectedPaths();
-  if (paths.empty())
-    return;
-  std::array<wchar_t, 32768> output{};
-  wcscpy_s(output.data(), output.size(), L"archive.zip");
-  OPENFILENAMEW dialog{};
-  dialog.lStructSize = sizeof(dialog);
-  dialog.hwndOwner = window_;
-  dialog.lpstrFile = output.data();
-  dialog.nMaxFile = static_cast<DWORD>(output.size());
-  dialog.lpstrFilter = L"ZIPアーカイブ (*.zip)\0*.zip\0";
-  dialog.lpstrDefExt = L"zip";
-  dialog.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | OFN_EXPLORER;
-  if (GetSaveFileNameW(&dialog)) {
-    std::error_code absoluteError;
-    const std::filesystem::path destination =
-        std::filesystem::absolute(output.data(), absoluteError);
-    if (absoluteError) {
-      Notify(L"ZIP出力先を解決できません", true);
-      return;
-    }
-    const bool overwritesSource = std::any_of(
-        paths.begin(), paths.end(), [&destination](const std::wstring &source) {
-          std::error_code error;
-          return std::filesystem::equivalent(destination, source, error);
-        });
-    if (overwritesSource) {
-      Notify(L"選択したファイル自身をZIP出力先にはできません", true);
-      return;
-    }
-    ++pendingZipOperations_;
-    CreateZipAsync(window_, paths, output.data());
-    Notify(L"ZIPを作成中です");
-  }
-}
-
-void App::ExtractSelectedZip() {
-  const auto paths = SelectedPaths();
-  if (paths.size() != 1 || !HasZipExtension(paths.front()))
-    return;
-  const std::wstring destination = PickFolder(window_, L"展開先を選択");
-  if (destination.empty())
-    return;
-  ++pendingZipOperations_;
-  ExtractZipAsync(window_, paths.front(), destination);
-  Notify(L"ZIPを展開中です");
-}
-
 int App::PaneIndexFromControl(HWND control) const {
   if (control == panes_[0].list || control == panes_[0].address)
     return 0;
@@ -2785,19 +2676,41 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
       AddLink(true);
       break;
     case IdTerminal:
-      ShowTerminalMenu(toolbar_[5]);
+      terminalController_.ShowTerminalMenu(
+          window_, toolbar_[5], !panes_[activePane_].path.empty(),
+          {IdCmd, IdCmdAdmin, IdPowerShell, IdPowerShellAdmin});
       break;
     case IdCmd:
-      LaunchSelectedTerminal(TerminalKind::CommandPrompt, false);
+      terminalController_.LaunchSelectedTerminal(
+          window_, ActivePaneEffectivePath(),
+          TerminalKind::CommandPrompt, false,
+          [this](const std::wstring &message, bool error) {
+            Notify(message, error);
+          });
       break;
     case IdCmdAdmin:
-      LaunchSelectedTerminal(TerminalKind::CommandPrompt, true);
+      terminalController_.LaunchSelectedTerminal(
+          window_, ActivePaneEffectivePath(),
+          TerminalKind::CommandPrompt, true,
+          [this](const std::wstring &message, bool error) {
+            Notify(message, error);
+          });
       break;
     case IdPowerShell:
-      LaunchSelectedTerminal(TerminalKind::PowerShell, false);
+      terminalController_.LaunchSelectedTerminal(
+          window_, ActivePaneEffectivePath(),
+          TerminalKind::PowerShell, false,
+          [this](const std::wstring &message, bool error) {
+            Notify(message, error);
+          });
       break;
     case IdPowerShellAdmin:
-      LaunchSelectedTerminal(TerminalKind::PowerShell, true);
+      terminalController_.LaunchSelectedTerminal(
+          window_, ActivePaneEffectivePath(),
+          TerminalKind::PowerShell, true,
+          [this](const std::wstring &message, bool error) {
+            Notify(message, error);
+          });
       break;
     case IdSearch:
       if (ParseCommandQuery(GetWindowTextString(searchEdit_)).mode !=
@@ -2850,10 +2763,18 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
       OpenSelected();
       break;
     case IdZipCreate:
-      CreateZipFromSelection();
+      zipController_.CreateZipFromSelection(
+          window_, SelectedPaths(),
+          [this](const std::wstring &message, bool error) {
+            Notify(message, error);
+          });
       break;
     case IdZipExtract:
-      ExtractSelectedZip();
+      zipController_.ExtractSelectedZip(
+          window_, SelectedPaths(),
+          [this](const std::wstring &message, bool error) {
+            Notify(message, error);
+          });
       break;
     case IdShowHidden:
       panes_[activePane_].showHidden = !panes_[activePane_].showHidden;
@@ -3145,25 +3066,23 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
     return 0;
   }
   case kMessageZipDone: {
-    std::unique_ptr<ZipResult> result(reinterpret_cast<ZipResult *>(lParam));
-    if (pendingZipOperations_ > 0)
-      --pendingZipOperations_;
-    if (result->success) {
-      Notify(result->message);
-      RefreshPane(activePane_);
-    } else {
-      Notify(result->message, true);
-    }
+    zipController_.HandleZipDone(
+        lParam, activePane_,
+        [this](const std::wstring &message, bool error) {
+          Notify(message, error);
+        },
+        [this](int pane) { RefreshPane(pane); });
     SetFocus(panes_[activePane_].list);
     return 0;
   }
   case WM_CLOSE:
-    if (pendingFileOperations_ + pendingZipOperations_ > 0) {
+    if (pendingFileOperations_ + zipController_.PendingOperationCount() > 0) {
       const std::wstring closeWarning =
           std::format(L"ファイル処理が {} 件進行中です。\n"
                       L"終了すると処理が途中で止まる可能性があります。\n\n"
                       L"それでも終了しますか？",
-                      pendingFileOperations_ + pendingZipOperations_);
+                      pendingFileOperations_ +
+                          zipController_.PendingOperationCount());
       if (MessageBoxW(window_, closeWarning.c_str(), L"SimpleFiler を終了",
                       MB_ICONWARNING | MB_YESNO | MB_DEFBUTTON2) != IDYES) {
         PostMessageW(window_, kMessageRestoreFocus, 0, 0);

@@ -3,7 +3,8 @@
 #include "core/CommandQuery.h"
 #include "core/Settings.h"
 #include "win/FileEnumerator.h"
-#include "win/TerminalLauncher.h"
+#include "win/TerminalController.h"
+#include "win/ZipController.h"
 
 #include <windows.h>
 
@@ -109,8 +110,6 @@ private:
   void EditSidebarItem();
   void RemoveSidebarItem();
   void MoveSidebarItem(bool up);
-  void ShowTerminalMenu(HWND sourceButton);
-  void LaunchSelectedTerminal(TerminalKind kind, bool administrator);
   void ShowFileMenu(POINT screenPoint);
   [[nodiscard]] bool
   ShowItemShellMenu(const std::vector<std::wstring> &paths,
@@ -119,8 +118,6 @@ private:
                                POINT screenPoint);
   void AppendFallbackBackgroundMenu(POINT screenPoint);
   void ShowLinkMenu(HWND sourceButton);
-  void CreateZipFromSelection();
-  void ExtractSelectedZip();
   void RebuildCommandSuggestions();
   void MoveCommandSelection(int delta);
   void AcceptCommandSuggestion(bool control = false, bool shift = false);
@@ -132,6 +129,7 @@ private:
   void ShowAboutDialog();
 
   [[nodiscard]] std::vector<std::wstring> SelectedPaths() const;
+  [[nodiscard]] std::wstring ActivePaneEffectivePath() const;
   [[nodiscard]] int PaneIndexFromControl(HWND control) const;
   [[nodiscard]] std::wstring PromptText(const std::wstring &title,
                                         const std::wstring &label,
@@ -163,7 +161,8 @@ private:
   bool draggingSplitter_ = false;
   bool settingsWritable_ = true;
   std::size_t pendingFileOperations_ = 0;
-  std::size_t pendingZipOperations_ = 0;
+  ZipController zipController_;
+  TerminalController terminalController_;
   double splitRatio_ = 0.5;
   std::vector<std::pair<bool, std::size_t>> sidebarMap_;
   std::vector<CommandSuggestion> commandSuggestionItems_;

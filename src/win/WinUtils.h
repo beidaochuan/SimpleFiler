@@ -2,6 +2,8 @@
 
 #include <windows.h>
 
+#include <shobjidl.h>
+
 #include <filesystem>
 #include <string>
 #include <vector>
@@ -76,6 +78,33 @@ inline std::wstring GetWindowTextString(HWND window) {
     GetWindowTextW(window, value.data(), length + 1);
   value.resize(static_cast<std::size_t>(length));
   return value;
+}
+
+inline std::wstring PickFolder(HWND owner, const wchar_t *title) {
+  IFileOpenDialog *dialog = nullptr;
+  if (FAILED(CoCreateInstance(CLSID_FileOpenDialog, nullptr,
+                              CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&dialog)))) {
+    return {};
+  }
+  FILEOPENDIALOGOPTIONS options{};
+  dialog->GetOptions(&options);
+  dialog->SetOptions(options | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM |
+                     FOS_PATHMUSTEXIST);
+  dialog->SetTitle(title);
+  std::wstring path;
+  if (SUCCEEDED(dialog->Show(owner))) {
+    IShellItem *item = nullptr;
+    if (SUCCEEDED(dialog->GetResult(&item))) {
+      PWSTR rawPath = nullptr;
+      if (SUCCEEDED(item->GetDisplayName(SIGDN_FILESYSPATH, &rawPath))) {
+        path = rawPath;
+        CoTaskMemFree(rawPath);
+      }
+      item->Release();
+    }
+  }
+  dialog->Release();
+  return path;
 }
 
 inline std::wstring ToExtendedPath(const std::wstring &path) {

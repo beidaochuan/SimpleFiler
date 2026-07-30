@@ -59,9 +59,13 @@
 
 ---
 
-## Phase 1: ZipController / TerminalController の切り出し（実装対象・詳細計画）
+## Phase 1: ZipController / TerminalController の切り出し（実装済み）
 
 最も自己完結度が高い2機能から着手する。
+
+実装日: 2026-07-30。`ZipController`と`TerminalController`への切り出し、
+`PickFolder`の`WinUtils.h`への移設、`App`からの委譲、CMakeへの追加まで完了。
+Windows x64 Releaseビルドと全CTest（UIスモークを含む6件）の通過を確認済み。
 
 ### 新規ファイル
 

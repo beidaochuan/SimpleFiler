@@ -72,7 +72,9 @@ if(WIN32)
         src/win/App.cpp
         src/win/FileEnumerator.cpp
         src/win/ShellOperations.cpp
+        src/win/TerminalController.cpp
         src/win/TerminalLauncher.cpp
+        src/win/ZipController.cpp
         src/win/ZipOperations.cpp
         src/win/main.cpp
         resources/SimpleFiler.rc
