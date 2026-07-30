@@ -199,12 +199,14 @@ function Set-ForegroundReliable {
 $testRoot = Join-Path ([IO.Path]::GetTempPath()) (
     'simplefiler-ui-' + [Guid]::NewGuid().ToString('N'))
 $targetFolder = Join-Path $testRoot 'jump-target'
+$sidebarTarget = Join-Path $testRoot 'sidebar-target'
 $appPath = Join-Path $testRoot 'SimpleFiler.exe'
 $appLaunchMarker = Join-Path $testRoot 'aa-launch-marker.txt'
 $process = $null
 
 try {
     New-Item -ItemType Directory -Path $targetFolder | Out-Null
+    New-Item -ItemType Directory -Path $sidebarTarget | Out-Null
     Copy-Item -LiteralPath $Executable -Destination $appPath
 
     $settings = @{
@@ -242,6 +244,13 @@ try {
                 path = $targetFolder
                 alias = 'work'
                 keywords = @('project', 'development')
+            },
+            @{
+                id = 'folder-sidebar'
+                name = 'Sidebar Target'
+                path = $sidebarTarget
+                alias = 'sidebar'
+                keywords = @('sidebar')
             }
         )
         links = @(
@@ -611,6 +620,26 @@ try {
             $editedText.ToString() -eq 'elete-check'
         })) {
         throw 'Delete was not handled as text editing in the command field'
+    }
+
+    # Activate the second bookmark through the sidebar double-click route.
+    $selectedSidebarItem = [SimpleFilerNativeMethods]::SendMessage(
+        $sidebar, 0x0186, [IntPtr]1, [IntPtr]::Zero).ToInt32()
+    if ($selectedSidebarItem -ne 1) {
+        throw 'Could not select the sidebar bookmark'
+    }
+    $sidebarDoubleClickCommand = 220 -bor (2 -shl 16)
+    [void][SimpleFilerNativeMethods]::SendMessage(
+        $mainWindow, 0x0111, [IntPtr]$sidebarDoubleClickCommand, $sidebar)
+    if (!(Wait-Until -Condition {
+            $addressText.Clear() | Out-Null
+            [void][SimpleFilerNativeMethods]::SendMessageGetText(
+                $leftAddress, 0x000D, [IntPtr]$addressText.Capacity,
+                $addressText)
+            $addressText.ToString() -eq $sidebarTarget
+        })) {
+        throw "Sidebar bookmark navigated to '$addressText' instead of " +
+            "'$sidebarTarget'"
     }
 
     Write-Output 'SimpleFiler UI smoke tests passed'

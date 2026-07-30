@@ -3,6 +3,7 @@
 #include "core/CommandQuery.h"
 #include "core/Settings.h"
 #include "win/FileEnumerator.h"
+#include "win/SidebarController.h"
 #include "win/TerminalController.h"
 #include "win/ZipController.h"
 
@@ -101,15 +102,6 @@ private:
   void DeleteSelection(bool permanent);
   void NewFolder();
   void ShowSelectedProperties();
-  void AddCurrentBookmark();
-  void AddLinkedFolder();
-  void AddBookmarkForPath(const std::wstring &path);
-  void AddLink(bool application);
-  void RebuildSidebar();
-  void ActivateSidebarItem(bool administrator = false);
-  void EditSidebarItem();
-  void RemoveSidebarItem();
-  void MoveSidebarItem(bool up);
   void ShowFileMenu(POINT screenPoint);
   [[nodiscard]] bool
   ShowItemShellMenu(const std::vector<std::wstring> &paths,
@@ -161,10 +153,10 @@ private:
   bool draggingSplitter_ = false;
   bool settingsWritable_ = true;
   std::size_t pendingFileOperations_ = 0;
+  SidebarController sidebarController_;
   ZipController zipController_;
   TerminalController terminalController_;
   double splitRatio_ = 0.5;
-  std::vector<std::pair<bool, std::size_t>> sidebarMap_;
   std::vector<CommandSuggestion> commandSuggestionItems_;
   std::wstring commandPrefixBuffer_;
   HWND commandPrefixSource_ = nullptr;

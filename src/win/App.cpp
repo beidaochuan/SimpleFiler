@@ -1,13 +1,11 @@
 #include "win/App.h"
 
 #include "core/AppArguments.h"
-#include "core/PortablePath.h"
 #include "win/AppMessages.h"
 #include "win/ShellOperations.h"
 #include "win/WinUtils.h"
 
 #include <commctrl.h>
-#include <commdlg.h>
 #include <shellapi.h>
 #include <shlobj.h>
 #include <shlwapi.h>
@@ -350,53 +348,6 @@ int ShowMessageBoxCenteredOnParent(HWND parent, const std::wstring &text,
   return result;
 }
 
-std::wstring LeafName(const std::wstring &path) {
-  std::filesystem::path value(path);
-  if (!value.filename().empty())
-    return value.filename().wstring();
-  return path;
-}
-
-std::vector<std::string> SplitKeywords(const std::wstring &text) {
-  std::vector<std::string> result;
-  std::wstring current;
-  const auto flush = [&result, &current] {
-    if (!current.empty()) {
-      result.push_back(WideToUtf8(current));
-      current.clear();
-    }
-  };
-  for (const wchar_t character : text) {
-    if (std::iswspace(static_cast<wint_t>(character)) != 0 ||
-        character == L',' || character == L';' || character == L'、') {
-      flush();
-    } else {
-      current.push_back(character);
-    }
-  }
-  flush();
-  return result;
-}
-
-std::wstring JoinKeywords(const std::vector<std::string> &keywords) {
-  std::wstring result;
-  for (const std::string &keyword : keywords) {
-    if (!result.empty())
-      result.push_back(L' ');
-    result += Utf8ToWide(keyword);
-  }
-  return result;
-}
-
-std::wstring ResolveAppPath(const std::wstring &path) {
-  return sf::ResolvePortablePath(path, ExecutablePath().parent_path())
-      .wstring();
-}
-
-std::wstring MakeAppPath(const std::wstring &path) {
-  return sf::MakePortablePath(path, ExecutablePath().parent_path()).wstring();
-}
-
 template <typename T> class ComPtr final {
 public:
   ComPtr() = default;
@@ -669,7 +620,7 @@ void App::CreateControls() {
   RECT client{};
   GetClientRect(window_, &client);
   LayoutControls(client.right, client.bottom);
-  RebuildSidebar();
+  sidebarController_.RebuildSidebar(sidebar_, settings_);
   UpdateActivePaneVisuals();
 }
 
@@ -1378,256 +1329,6 @@ void App::ShowSelectedProperties() {
     ShowProperties(window_, paths.front());
 }
 
-void App::AddCurrentBookmark() {
-  const Pane &pane = panes_[activePane_];
-  const std::wstring path = pane.searchMode ? pane.searchRoot : pane.path;
-  if (path.empty())
-    return;
-  AddBookmarkForPath(path);
-}
-
-void App::AddLinkedFolder() {
-  const std::wstring path = PickFolder(window_, L"フォルダーリンクを登録");
-  if (path.empty())
-    return;
-  AddBookmarkForPath(path);
-}
-
-void App::AddBookmarkForPath(const std::wstring &path) {
-  const std::wstring name =
-      PromptText(L"ブックマーク追加", L"表示名", LeafName(path));
-  if (name.empty())
-    return;
-  const std::wstring alias =
-      PromptText(L"ブックマーク追加", L"ffのエイリアス（省略可）");
-  const std::wstring keywords = PromptText(
-      L"ブックマーク追加", L"検索キーワード（空白区切り、省略可）");
-  settings_.bookmarks.push_back(
-      {MakeStableId(), WideToUtf8(name), WideToUtf8(path), WideToUtf8(alias),
-       SplitKeywords(keywords)});
-  RebuildSidebar();
-  SaveSettings();
-}
-
-void App::AddLink(bool application) {
-  std::array<wchar_t, 32768> file{};
-  OPENFILENAMEW dialog{};
-  dialog.lStructSize = sizeof(dialog);
-  dialog.hwndOwner = window_;
-  dialog.lpstrFile = file.data();
-  dialog.nMaxFile = static_cast<DWORD>(file.size());
-  dialog.lpstrTitle =
-      application ? L"アプリリンクを登録" : L"ファイルリンクを登録";
-  dialog.lpstrFilter =
-      application ? L"アプリケーション (*.exe)\0*.exe\0すべてのファイル\0*.*\0"
-                  : L"すべてのファイル\0*.*\0";
-  dialog.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_EXPLORER;
-  if (!GetOpenFileNameW(&dialog))
-    return;
-  std::wstring name =
-      PromptText(L"リンク追加", L"表示名", LeafName(file.data()));
-  if (name.empty())
-    return;
-  std::wstring arguments;
-  std::wstring workingDirectory;
-  if (application) {
-    arguments = PromptText(L"アプリリンク", L"引数（省略可）");
-    workingDirectory =
-        PromptText(L"アプリリンク", L"作業フォルダー（省略可）",
-                   std::filesystem::path(file.data()).parent_path().wstring());
-  }
-  const std::wstring alias = PromptText(
-      L"リンク追加",
-      application ? L"aaのエイリアス（省略可）"
-                  : L"エイリアス（省略可）");
-  const std::wstring keywords = PromptText(
-      L"リンク追加", L"検索キーワード（空白区切り、省略可）");
-  const bool runAsAdministrator =
-      application &&
-      MessageBoxW(window_, L"通常の起動を管理者権限にしますか？",
-                  L"アプリリンク", MB_ICONQUESTION | MB_YESNO |
-                                        MB_DEFBUTTON2) == IDYES;
-  settings_.links.push_back(
-      {MakeStableId(), application ? LinkType::Application : LinkType::File,
-       WideToUtf8(name), WideToUtf8(MakeAppPath(file.data())),
-       WideToUtf8(arguments),
-       WideToUtf8(MakeAppPath(workingDirectory)), WideToUtf8(alias),
-       SplitKeywords(keywords), runAsAdministrator});
-  RebuildSidebar();
-  SaveSettings();
-}
-
-void App::RebuildSidebar() {
-  SendMessageW(sidebar_, LB_RESETCONTENT, 0, 0);
-  sidebarMap_.clear();
-  for (std::size_t index = 0; index < settings_.bookmarks.size(); ++index) {
-    const Bookmark &bookmark = settings_.bookmarks[index];
-    const std::wstring path = Utf8ToWide(bookmark.path);
-    const std::wstring prefix = IsDirectory(path) ? L"★ " : L"⚠ ";
-    SendMessageW(
-        sidebar_, LB_ADDSTRING, 0,
-        reinterpret_cast<LPARAM>((prefix + Utf8ToWide(bookmark.name)).c_str()));
-    sidebarMap_.emplace_back(true, index);
-  }
-  for (std::size_t index = 0; index < settings_.links.size(); ++index) {
-    const RegisteredLink &link = settings_.links[index];
-    const std::wstring target =
-        ResolveAppPath(Utf8ToWide(link.target));
-    const std::wstring prefix =
-        GetFileAttributesW(ToExtendedPath(target).c_str()) !=
-                INVALID_FILE_ATTRIBUTES
-            ? L"↗ "
-            : L"⚠ ";
-    SendMessageW(
-        sidebar_, LB_ADDSTRING, 0,
-        reinterpret_cast<LPARAM>((prefix + Utf8ToWide(link.name)).c_str()));
-    sidebarMap_.emplace_back(false, index);
-  }
-}
-
-void App::ActivateSidebarItem(bool administrator) {
-  const int selected =
-      static_cast<int>(SendMessageW(sidebar_, LB_GETCURSEL, 0, 0));
-  if (selected < 0 || selected >= static_cast<int>(sidebarMap_.size()))
-    return;
-  const auto [bookmark, index] = sidebarMap_[selected];
-  if (bookmark) {
-    Navigate(activePane_, Utf8ToWide(settings_.bookmarks[index].path));
-    return;
-  }
-  const RegisteredLink &link = settings_.links[index];
-  if (link.type == LinkType::Application) {
-    LaunchRegisteredApplication(index, administrator, true);
-    return;
-  }
-  const std::wstring target = ResolveAppPath(Utf8ToWide(link.target));
-  if (GetFileAttributesW(ToExtendedPath(target).c_str()) ==
-      INVALID_FILE_ATTRIBUTES) {
-    Notify(L"登録先が見つかりません: " + target, true);
-    return;
-  }
-  if (!OpenPath(window_, target, Utf8ToWide(link.arguments),
-                ResolveAppPath(Utf8ToWide(link.workingDirectory)))) {
-    const DWORD error = GetLastError();
-    if (error != ERROR_CANCELLED)
-      Notify(L"リンク先を開けません: " + WindowsErrorMessage(error), true);
-  }
-}
-
-void App::EditSidebarItem() {
-  const int selected =
-      static_cast<int>(SendMessageW(sidebar_, LB_GETCURSEL, 0, 0));
-  if (selected < 0 || selected >= static_cast<int>(sidebarMap_.size()))
-    return;
-
-  const auto [bookmarkEntry, index] = sidebarMap_[selected];
-  if (bookmarkEntry) {
-    Bookmark &bookmark = settings_.bookmarks[index];
-    const std::wstring name = PromptText(
-        L"フォルダー登録を編集", L"表示名", Utf8ToWide(bookmark.name));
-    if (name.empty())
-      return;
-    const std::wstring path = PromptText(
-        L"フォルダー登録を編集", L"フォルダーパス",
-        Utf8ToWide(bookmark.path));
-    if (path.empty())
-      return;
-    const std::wstring alias = PromptText(
-        L"フォルダー登録を編集", L"ffのエイリアス（省略可）",
-        Utf8ToWide(bookmark.alias));
-    const std::wstring keywords = PromptText(
-        L"フォルダー登録を編集", L"検索キーワード（空白区切り）",
-        JoinKeywords(bookmark.keywords));
-    bookmark.name = WideToUtf8(name);
-    bookmark.path = WideToUtf8(path);
-    bookmark.alias = WideToUtf8(alias);
-    bookmark.keywords = SplitKeywords(keywords);
-  } else {
-    RegisteredLink &link = settings_.links[index];
-    const std::wstring name = PromptText(
-        L"リンク登録を編集", L"表示名", Utf8ToWide(link.name));
-    if (name.empty())
-      return;
-    const std::wstring target = PromptText(
-        L"リンク登録を編集", L"対象パス", Utf8ToWide(link.target));
-    if (target.empty())
-      return;
-    std::wstring arguments = Utf8ToWide(link.arguments);
-    std::wstring workingDirectory = Utf8ToWide(link.workingDirectory);
-    if (link.type == LinkType::Application) {
-      arguments = PromptText(L"アプリ登録を編集", L"引数テンプレート",
-                             arguments);
-      workingDirectory = PromptText(L"アプリ登録を編集",
-                                    L"作業フォルダー（省略可）",
-                                    workingDirectory);
-    }
-    const std::wstring alias = PromptText(
-        L"リンク登録を編集",
-        link.type == LinkType::Application ? L"aaのエイリアス（省略可）"
-                                           : L"エイリアス（省略可）",
-        Utf8ToWide(link.alias));
-    const std::wstring keywords = PromptText(
-        L"リンク登録を編集", L"検索キーワード（空白区切り）",
-        JoinKeywords(link.keywords));
-    bool runAsAdministrator = link.runAsAdministrator;
-    if (link.type == LinkType::Application) {
-      runAsAdministrator =
-          MessageBoxW(window_, L"通常の起動を管理者権限にしますか？",
-                      L"アプリ登録を編集",
-                      MB_ICONQUESTION | MB_YESNO |
-                          (link.runAsAdministrator ? MB_DEFBUTTON1
-                                                   : MB_DEFBUTTON2)) == IDYES;
-    }
-    link.name = WideToUtf8(name);
-    link.target = WideToUtf8(MakeAppPath(target));
-    link.arguments = WideToUtf8(arguments);
-    link.workingDirectory =
-        WideToUtf8(MakeAppPath(workingDirectory));
-    link.alias = WideToUtf8(alias);
-    link.keywords = SplitKeywords(keywords);
-    link.runAsAdministrator = runAsAdministrator;
-  }
-  RebuildSidebar();
-  SaveSettings();
-  SendMessageW(sidebar_, LB_SETCURSEL, selected, 0);
-}
-
-void App::RemoveSidebarItem() {
-  const int selected =
-      static_cast<int>(SendMessageW(sidebar_, LB_GETCURSEL, 0, 0));
-  if (selected < 0 || selected >= static_cast<int>(sidebarMap_.size()))
-    return;
-  const auto [bookmark, index] = sidebarMap_[selected];
-  if (bookmark)
-    settings_.bookmarks.erase(settings_.bookmarks.begin() + index);
-  else
-    settings_.links.erase(settings_.links.begin() + index);
-  RebuildSidebar();
-  SaveSettings();
-}
-
-void App::MoveSidebarItem(bool up) {
-  const int selected =
-      static_cast<int>(SendMessageW(sidebar_, LB_GETCURSEL, 0, 0));
-  if (selected < 0 || selected >= static_cast<int>(sidebarMap_.size()))
-    return;
-  const auto [bookmark, index] = sidebarMap_[selected];
-  const std::size_t sectionSize =
-      bookmark ? settings_.bookmarks.size() : settings_.links.size();
-  if (up ? index == 0 : index + 1 >= sectionSize)
-    return;
-  const std::size_t otherIndex = up ? index - 1 : index + 1;
-  if (bookmark) {
-    std::swap(settings_.bookmarks[index], settings_.bookmarks[otherIndex]);
-  } else {
-    std::swap(settings_.links[index], settings_.links[otherIndex]);
-  }
-  RebuildSidebar();
-  SaveSettings();
-  SendMessageW(sidebar_, LB_SETCURSEL,
-               up ? selected - 1 : selected + 1, 0);
-}
-
 void App::RebuildCommandSuggestions() {
   const CommandQuery command =
       ParseCommandQuery(GetWindowTextString(searchEdit_));
@@ -1849,9 +1550,21 @@ void App::AddCommandRegistration() {
       ParseCommandQuery(GetWindowTextString(searchEdit_)).mode;
   ShowWindow(commandSuggestions_, SW_HIDE);
   if (mode == CommandMode::Folder) {
-    AddCurrentBookmark();
+    sidebarController_.AddBookmarkForPath(
+        sidebar_, settings_, ActivePaneEffectivePath(),
+        [this](const std::wstring &title, const std::wstring &label,
+               const std::wstring &initial) {
+          return PromptText(title, label, initial);
+        },
+        [this] { SaveSettings(); });
   } else if (mode == CommandMode::Application) {
-    AddLink(true);
+    sidebarController_.AddLink(
+        window_, sidebar_, settings_, true,
+        [this](const std::wstring &title, const std::wstring &label,
+               const std::wstring &initial) {
+          return PromptText(title, label, initial);
+        },
+        [this] { SaveSettings(); });
   } else {
     Notify(L"ffまたはaaを入力してから登録してください", true);
     return;
@@ -2608,7 +2321,15 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
   case WM_COMMAND: {
     const int command = LOWORD(wParam);
     if (HIWORD(wParam) == LBN_DBLCLK && command == IdSidebar) {
-      ActivateSidebarItem();
+      sidebarController_.ActivateSidebarItem(
+          window_, sidebar_, settings_, false,
+          [this](const std::wstring &path) { Navigate(activePane_, path); },
+          [this](std::size_t index, bool administrator) {
+            LaunchRegisteredApplication(index, administrator, true);
+          },
+          [this](const std::wstring &message, bool error) {
+            Notify(message, error);
+          });
       return 0;
     }
     if (HIWORD(wParam) == LBN_DBLCLK &&
@@ -2661,19 +2382,43 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
       break;
     }
     case IdAddBookmark:
-      AddCurrentBookmark();
+      sidebarController_.AddBookmarkForPath(
+          sidebar_, settings_, ActivePaneEffectivePath(),
+          [this](const std::wstring &title, const std::wstring &label,
+                 const std::wstring &initial) {
+            return PromptText(title, label, initial);
+          },
+          [this] { SaveSettings(); });
       break;
     case IdAddLink:
       ShowLinkMenu(toolbar_[4]);
       break;
     case IdAddFolderLink:
-      AddLinkedFolder();
+      sidebarController_.AddLinkedFolder(
+          window_, sidebar_, settings_,
+          [this](const std::wstring &title, const std::wstring &label,
+                 const std::wstring &initial) {
+            return PromptText(title, label, initial);
+          },
+          [this] { SaveSettings(); });
       break;
     case IdAddFileLink:
-      AddLink(false);
+      sidebarController_.AddLink(
+          window_, sidebar_, settings_, false,
+          [this](const std::wstring &title, const std::wstring &label,
+                 const std::wstring &initial) {
+            return PromptText(title, label, initial);
+          },
+          [this] { SaveSettings(); });
       break;
     case IdAddAppLink:
-      AddLink(true);
+      sidebarController_.AddLink(
+          window_, sidebar_, settings_, true,
+          [this](const std::wstring &title, const std::wstring &label,
+                 const std::wstring &initial) {
+            return PromptText(title, label, initial);
+          },
+          [this] { SaveSettings(); });
       break;
     case IdTerminal:
       terminalController_.ShowTerminalMenu(
@@ -2804,22 +2549,47 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
       }
       break;
     case IdRemoveSidebar:
-      RemoveSidebarItem();
+      sidebarController_.RemoveSidebarItem(
+          sidebar_, settings_, [this] { SaveSettings(); });
       break;
     case IdEditSidebar:
-      EditSidebarItem();
+      sidebarController_.EditSidebarItem(
+          window_, sidebar_, settings_,
+          [this](const std::wstring &title, const std::wstring &label,
+                 const std::wstring &initial) {
+            return PromptText(title, label, initial);
+          },
+          [this] { SaveSettings(); });
       break;
     case IdOpenSidebar:
-      ActivateSidebarItem(false);
+      sidebarController_.ActivateSidebarItem(
+          window_, sidebar_, settings_, false,
+          [this](const std::wstring &path) { Navigate(activePane_, path); },
+          [this](std::size_t index, bool administrator) {
+            LaunchRegisteredApplication(index, administrator, true);
+          },
+          [this](const std::wstring &message, bool error) {
+            Notify(message, error);
+          });
       break;
     case IdOpenSidebarAdmin:
-      ActivateSidebarItem(true);
+      sidebarController_.ActivateSidebarItem(
+          window_, sidebar_, settings_, true,
+          [this](const std::wstring &path) { Navigate(activePane_, path); },
+          [this](std::size_t index, bool administrator) {
+            LaunchRegisteredApplication(index, administrator, true);
+          },
+          [this](const std::wstring &message, bool error) {
+            Notify(message, error);
+          });
       break;
     case IdMoveSidebarUp:
-      MoveSidebarItem(true);
+      sidebarController_.MoveSidebarItem(
+          sidebar_, settings_, true, [this] { SaveSettings(); });
       break;
     case IdMoveSidebarDown:
-      MoveSidebarItem(false);
+      sidebarController_.MoveSidebarItem(
+          sidebar_, settings_, false, [this] { SaveSettings(); });
       break;
     }
     PostMessageW(window_, kMessageRestoreFocus, 0, 0);
@@ -2937,35 +2707,11 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
   }
   case WM_CONTEXTMENU:
     if (reinterpret_cast<HWND>(wParam) == sidebar_) {
-      HMENU menu = CreatePopupMenu();
-      AppendMenuW(menu, MF_STRING, IdOpenSidebar, L"開く");
-      const int selected =
-          static_cast<int>(SendMessageW(sidebar_, LB_GETCURSEL, 0, 0));
-      bool canRunAsAdmin = false;
-      bool canMoveUp = false;
-      bool canMoveDown = false;
-      if (selected >= 0 && selected < static_cast<int>(sidebarMap_.size())) {
-        const auto [bookmark, index] = sidebarMap_[selected];
-        canRunAsAdmin =
-            !bookmark && settings_.links[index].type == LinkType::Application;
-        const std::size_t sectionSize =
-            bookmark ? settings_.bookmarks.size() : settings_.links.size();
-        canMoveUp = index > 0;
-        canMoveDown = index + 1 < sectionSize;
-      }
-      AppendMenuW(menu, MF_STRING | (canRunAsAdmin ? 0 : MF_GRAYED),
-                  IdOpenSidebarAdmin, L"管理者として実行");
-      AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-      AppendMenuW(menu, MF_STRING, IdEditSidebar, L"登録を編集");
-      AppendMenuW(menu, MF_STRING, IdRemoveSidebar, L"登録を削除");
-      AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-      AppendMenuW(menu, MF_STRING | (canMoveUp ? 0 : MF_GRAYED),
-                  IdMoveSidebarUp, L"上へ移動");
-      AppendMenuW(menu, MF_STRING | (canMoveDown ? 0 : MF_GRAYED),
-                  IdMoveSidebarDown, L"下へ移動");
-      TrackPopupMenu(menu, TPM_RIGHTBUTTON, GET_X_LPARAM(lParam),
-                     GET_Y_LPARAM(lParam), 0, window_, nullptr);
-      DestroyMenu(menu);
+      sidebarController_.ShowContextMenu(
+          window_, sidebar_,
+          {GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)}, settings_,
+          {IdOpenSidebar, IdOpenSidebarAdmin, IdEditSidebar, IdRemoveSidebar,
+           IdMoveSidebarUp, IdMoveSidebarDown});
       PostMessageW(window_, kMessageRestoreFocus, 0, 0);
       return 0;
     }
@@ -2990,7 +2736,8 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
     return 0;
   case kMessageSidebarMove:
     if (reinterpret_cast<HWND>(lParam) == sidebar_)
-      MoveSidebarItem(wParam != 0);
+      sidebarController_.MoveSidebarItem(
+          sidebar_, settings_, wParam != 0, [this] { SaveSettings(); });
     return 0;
   case kMessageRestoreFocus:
     RestorePaneFocusIfNeeded();

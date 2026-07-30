@@ -1,5 +1,7 @@
 #pragma once
 
+#include "core/PortablePath.h"
+
 #include <windows.h>
 
 #include <shobjidl.h>
@@ -105,6 +107,15 @@ inline std::wstring PickFolder(HWND owner, const wchar_t *title) {
   }
   dialog->Release();
   return path;
+}
+
+inline std::wstring ResolveAppPath(const std::wstring &path) {
+  return sf::ResolvePortablePath(path, ExecutablePath().parent_path())
+      .wstring();
+}
+
+inline std::wstring MakeAppPath(const std::wstring &path) {
+  return sf::MakePortablePath(path, ExecutablePath().parent_path()).wstring();
 }
 
 inline std::wstring ToExtendedPath(const std::wstring &path) {

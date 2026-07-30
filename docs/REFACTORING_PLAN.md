@@ -235,28 +235,147 @@ public:
 
 ---
 
-## Phase 2以降(概要・未詳細化)
+## Phase 2: SidebarController の切り出し（実装済み）
 
-Phase 1完了後、以下の順で進める想定。着手時に改めてApp.cppの最新状態を調査し、
-このドキュメントを更新すること(Phase 1でメソッドが削除され行番号がずれるため)。
+Phase 1完了後の`App.cpp`を再調査した結果、サイドバーの表示項目と設定配列の対応を表す
+`sidebarMap_`は、登録の追加・編集・削除・並べ替えだけでなく右クリックメニューの活性状態
+判定にも使われている。この対応表を`App`に公開せず`SidebarController`が所有するため、
+当初の対象メソッドに右クリックメニュー処理も加えて一体で切り出す。
 
-### Phase 2: サイドバー（ブックマーク・リンク）
+実装日: 2026-07-30。`SidebarController`への切り出し、右クリックメニュー処理と
+`sidebarMap_`の移設、共通パスヘルパーの`WinUtils.h`への移設、CMakeへの追加まで完了。
+Windows x64 Releaseビルドと全CTest（UIスモークを含む6件）の通過を確認済み。
 
-- 対象: `AddCurrentBookmark`, `AddLinkedFolder`, `AddBookmarkForPath`, `AddLink`,
-  `RebuildSidebar`, `ActivateSidebarItem`, `EditSidebarItem`, `RemoveSidebarItem`,
-  `MoveSidebarItem`
-- 主な依存: `sidebar_`(HWND), `sidebarMap_`, `settings_.bookmarks/links`
-- 注意点: `ActivateSidebarItem`はA(`Navigate`)とF(`LaunchRegisteredApplication`、
-  Phase 3で切り出す可能性)を呼ぶため、依存方向を整理する必要がある。
-  `settings_`はF・Dからも参照されるため、Appが所有し続け参照渡しする形が妥当。
+### 境界と依存方向
 
-### Phase 3: コマンドパレット
+- `AppSettings`はコマンドパレット・シェルメニュー・アプリ起動からも参照されるため、
+  引き続き`App`が所有し、必要な操作へ参照渡しする。
+- `SidebarController`は`sidebarMap_`だけを所有する。`HWND`や`AppSettings&`を
+  コンストラクタで保持せず、操作時の引数として受け取る。
+- `PromptText`、`SaveSettings`、`Notify`はコールバックで受け取る。
+- ブックマークの起動は`NavigateFn`、アプリリンクの起動は
+  `LaunchApplicationFn`へ委譲する。これにより`Pane`や
+  `LaunchRegisteredApplication`の実装を知らない。
+- ファイルリンクは自己完結しているため、現行どおり`OpenPath`で直接起動する。
+- `AddCurrentBookmark`は`App`側で`ActivePaneEffectivePath()`を計算し、
+  `SidebarController::AddBookmarkForPath`を直接呼ぶ。委譲ラッパーは残さない。
+- `ShowLinkMenu`はPhase 4のシェルメニュー対象なので今回は`App`に残す。
 
-- 対象: `RebuildCommandSuggestions`, `MoveCommandSelection`, `AcceptCommandSuggestion`,
-  `DismissCommandSuggestions`, `HandleCommandPrefixCharacter`, `AddCommandRegistration`,
+### 新規ファイル
+
+#### `src/win/SidebarController.h` / `.cpp`
+
+公開操作は以下とする。
+
+- `AddBookmarkForPath`
+- `AddLinkedFolder`
+- `AddLink`
+- `RebuildSidebar`
+- `ActivateSidebarItem`
+- `EditSidebarItem`
+- `RemoveSidebarItem`
+- `MoveSidebarItem`
+- `ShowContextMenu`
+
+右クリックメニューの実コマンドIDは`App.cpp`の`ControlId`を共有ヘッダーへ移さず、
+`SidebarMenuIds`として呼び出し時に渡す。`sidebarMap_`は
+`std::vector<std::pair<bool, std::size_t>>`としてprivateメンバーへ移す。
+
+`LeafName`、`SplitKeywords`、`JoinKeywords`はサイドバー登録処理だけで使われるため
+`SidebarController.cpp`の匿名namespaceへ移す。`ResolveAppPath`と`MakeAppPath`は
+コマンドパレット・アプリ起動からも使われるため、`WinUtils.h`の共通inline関数へ移す。
+
+### 変更ファイル
+
+#### `src/win/App.h` / `.cpp`
+
+- `SidebarController`をメンバーとして追加する。
+- 対象9メソッドの宣言・実装と`sidebarMap_`を削除する。
+- 初期表示、`WM_COMMAND`、サイドバーのダブルクリック、
+  `kMessageSidebarMove`をコントローラーへの直接委譲に変更する。
+- `WM_CONTEXTMENU`のサイドバー分岐を`ShowContextMenu`への委譲に置き換える。
+- `AddCommandRegistration`のフォルダー・アプリ登録もコントローラーへ直接委譲する。
+
+#### `src/win/WinUtils.h`
+
+`ResolveAppPath`と`MakeAppPath`を追加し、`App.cpp`内の同名定義を削除する。
+
+#### `CMakeLists.txt`
+
+`src/win/SidebarController.cpp`を`SimpleFiler`のソースへ追加する。
+
+### 検証
+
+1. `build.bat test`でWindows x64 Releaseビルドと全CTestを実行する。
+2. UIスモークで起動・サイドバー描画・基本操作に回帰がないことを確認する。
+3. 実機で追加（フォルダー・ファイル・アプリ）、編集、削除、並べ替え、
+   通常起動・管理者起動、存在しないリンクの警告を確認する。
+
+---
+
+## Phase 3: CommandController の切り出し（次回実装対象・詳細計画）
+
+Phase 2完了後の`App.cpp`を再調査した。候補リストとプレフィックス入力の状態は
+自己完結している一方、候補確定後のフォルダー移動・アプリ起動・端末起動、
+新規登録では他コントローラーを横断する。`CommandController`自身が他コントローラーを
+所有せず、操作結果をコールバックで`App`へ返す境界とする。
+
+### 対象と所有状態
+
+- 対象: `RebuildCommandSuggestions`, `MoveCommandSelection`,
+  `AcceptCommandSuggestion`, `DismissCommandSuggestions`,
+  `HandleCommandPrefixCharacter`, `AddCommandRegistration`,
   `LaunchRegisteredApplication`
-- 主な依存: `commandSuggestions_`, `commandSuggestionItems_`, `commandPrefixBuffer_`等
-  (自己完結度は比較的高い)、ただしA/B/Cを横断参照するため最後に近い順序が安全。
+- `CommandSuggestionKind`と`CommandSuggestion`を`App`から移す。
+- `commandSuggestionItems_`、`commandPrefixBuffer_`、
+  `commandPrefixSource_`、`commandPrefixTick_`をコントローラーへ移す。
+- `searchEdit_`と`commandSuggestions_`はレイアウト・DPI・生成を`App`が担うため、
+  `App`に残して操作時に渡す。
+- `AppSettings`も引き続き`App`が所有し、候補構築・アプリ起動へ参照渡しする。
+
+### 依存方向
+
+- フォルダー候補の確定は、対象パスと別ペイン指定を`NavigateFn`へ渡す。
+- アプリ候補の確定とサイドバー・ファイルメニューからのアプリ起動は、
+  `CommandController::LaunchRegisteredApplication`へ集約する。
+- アプリ引数展開に必要な選択パスと左右・反対側のフォルダーは、既存の
+  `AppArgumentContext`を`App`で組み立てて渡す。`CommandController`は`Pane`を知らない。
+- 端末候補の確定は`LaunchTerminalFn`へ委譲し、`App`から
+  `TerminalController`へ接続する。
+- 検索文字列がコマンドでない場合の検索開始は`StartSearchFn`へ委譲する。
+- `AddCommandRegistration`は登録種別を判定するところまで担当し、
+  `AddBookmarkFn`または`AddApplicationFn`へ委譲する。`App`から
+  `SidebarController`へ接続する。
+- 通知、アクティブペイン更新、フォーカス復元はコールバックで`App`へ戻す。
+
+### 呼び出し元の変更
+
+- `WM_COMMAND`の検索欄変更、候補ダブルクリック、検索ボタンを委譲する。
+- `kMessageCommandType`、`kMessageCommandAccept`、`kMessageCommandMove`,
+  `kMessageCommandDismiss`、`kMessageCommandNew`を委譲する。
+- アドレス欄フォーカス時の候補非表示・クリアもコントローラー操作へ置き換える。
+- サイドバーのアプリリンク起動コールバックとファイルメニューの登録アプリ起動を
+  新コントローラーへ接続する。
+
+### 新規・変更ファイル
+
+- `src/win/CommandController.h` / `.cpp`を追加する。
+- `App.h`から対象メソッド・候補型・候補/プレフィックス状態を削除し、
+  `CommandController`メンバーを追加する。
+- `App.cpp`を直接委譲へ変更する。
+- `CMakeLists.txt`へ`src/win/CommandController.cpp`を追加する。
+
+### 検証
+
+1. `ff`、`aa`、`cmd`の候補構築・絞り込み・上下移動・確定・キャンセル。
+2. Ctrl/Shift修飾による管理者起動、選択パス省略、反対ペインでのフォルダー表示。
+3. コマンド入力でない場合の通常検索。
+4. `ff`/`aa`入力後の新規登録とサイドバー即時更新。
+5. Windows x64 Releaseビルドと全CTest（UIスモークを含む）。
+
+---
+
+## Phase 4以降（概要・未詳細化）
 
 ### Phase 4: シェルメニュー
 
