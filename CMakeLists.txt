@@ -73,6 +73,7 @@ if(WIN32)
         src/win/CommandController.cpp
         src/win/FileEnumerator.cpp
         src/win/SidebarController.cpp
+        src/win/ShellMenuController.cpp
         src/win/ShellOperations.cpp
         src/win/TerminalController.cpp
         src/win/TerminalLauncher.cpp

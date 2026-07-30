@@ -346,40 +346,6 @@ int ShowMessageBoxCenteredOnParent(HWND parent, const std::wstring &text,
   return result;
 }
 
-template <typename T> class ComPtr final {
-public:
-  ComPtr() = default;
-  ComPtr(const ComPtr &) = delete;
-  ComPtr &operator=(const ComPtr &) = delete;
-  ~ComPtr() {
-    if (ptr_ != nullptr)
-      ptr_->Release();
-  }
-  T **AddressOf() { return &ptr_; }
-  T *Get() const { return ptr_; }
-  T *operator->() const { return ptr_; }
-  explicit operator bool() const { return ptr_ != nullptr; }
-  T *Detach() {
-    T *detached = ptr_;
-    ptr_ = nullptr;
-    return detached;
-  }
-
-private:
-  T *ptr_ = nullptr;
-};
-
-struct PidlDeleter final {
-  using pointer = PIDLIST_ABSOLUTE;
-
-  void operator()(pointer pidl) const {
-    if (pidl != nullptr)
-      ILFree(pidl);
-  }
-};
-
-using UniquePidl = std::unique_ptr<ITEMIDLIST_ABSOLUTE, PidlDeleter>;
-
 HFONT CreateUiFont(UINT dpi) {
   NONCLIENTMETRICSW metrics{};
   metrics.cbSize = sizeof(metrics);
@@ -428,8 +394,6 @@ App::App(HINSTANCE instance)
       settingsStore_(ExecutablePath().parent_path() / L"simplefiler.json") {}
 
 App::~App() {
-  if (cachedBackgroundMenu_ != nullptr)
-    cachedBackgroundMenu_->Release();
   for (Pane &pane : panes_) {
     if (pane.worker)
       pane.worker->request_stop();
@@ -1342,344 +1306,6 @@ void App::ShowSelectedProperties() {
     ShowProperties(window_, paths.front());
 }
 
-void App::ShowLinkMenu(HWND sourceButton) {
-  HMENU menu = CreatePopupMenu();
-  AppendMenuW(menu, MF_STRING, IdAddFolderLink, L"フォルダーリンクを追加");
-  AppendMenuW(menu, MF_STRING, IdAddFileLink, L"ファイルリンクを追加");
-  AppendMenuW(menu, MF_STRING, IdAddAppLink, L"アプリリンクを追加");
-  RECT rectangle{};
-  GetWindowRect(sourceButton, &rectangle);
-  TrackPopupMenu(menu, TPM_LEFTALIGN | TPM_TOPALIGN, rectangle.left,
-                 rectangle.bottom, 0, window_, nullptr);
-  DestroyMenu(menu);
-}
-
-void App::AppendFallbackBackgroundMenu(POINT screenPoint) {
-  HMENU menu = CreatePopupMenu();
-  AppendMenuW(menu, MF_STRING, IdPaste, L"貼り付け");
-  AppendMenuW(menu, MF_STRING, IdNewFolder, L"新しいフォルダー");
-  const UINT selectedCommand =
-      TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, screenPoint.x,
-                     screenPoint.y, 0, window_, nullptr);
-  DestroyMenu(menu);
-  if (selectedCommand != 0)
-    SendMessageW(window_, WM_COMMAND, selectedCommand, 0);
-}
-
-void App::ShowBackgroundShellMenu(const std::wstring &folderPath,
-                                  POINT screenPoint) {
-  IContextMenu *contextMenu = nullptr;
-  if (cachedBackgroundMenu_ != nullptr &&
-      cachedBackgroundMenuFolder_ == folderPath) {
-    contextMenu = cachedBackgroundMenu_;
-  } else {
-    if (cachedBackgroundMenu_ != nullptr) {
-      cachedBackgroundMenu_->Release();
-      cachedBackgroundMenu_ = nullptr;
-      cachedBackgroundMenuFolder_.clear();
-    }
-    PIDLIST_ABSOLUTE pidl = nullptr;
-    if (FAILED(SHParseDisplayName(folderPath.c_str(), nullptr, &pidl, 0,
-                                  nullptr)) ||
-        pidl == nullptr) {
-      AppendFallbackBackgroundMenu(screenPoint);
-      return;
-    }
-    ComPtr<IShellFolder> desktop;
-    ComPtr<IShellFolder> folder;
-    ComPtr<IContextMenu> freshContextMenu;
-    const bool bound =
-        SUCCEEDED(SHGetDesktopFolder(desktop.AddressOf())) &&
-        SUCCEEDED(desktop->BindToObject(pidl, nullptr,
-                                        IID_PPV_ARGS(folder.AddressOf()))) &&
-        SUCCEEDED(folder->CreateViewObject(
-            window_, IID_PPV_ARGS(freshContextMenu.AddressOf())));
-    ILFree(pidl);
-    if (!bound) {
-      AppendFallbackBackgroundMenu(screenPoint);
-      return;
-    }
-    cachedBackgroundMenuFolder_ = folderPath;
-    cachedBackgroundMenu_ = freshContextMenu.Detach();
-    contextMenu = cachedBackgroundMenu_;
-  }
-
-  HMENU menu = CreatePopupMenu();
-  // The background menu has no selected item, so CMF_CANRENAME (which
-  // Explorer only sets for a single-item selection) is intentionally omitted.
-  if (FAILED(contextMenu->QueryContextMenu(menu, 0, IdShellMenuFirst,
-                                           IdShellMenuLast, CMF_NORMAL))) {
-    DestroyMenu(menu);
-    cachedBackgroundMenu_->Release();
-    cachedBackgroundMenu_ = nullptr;
-    cachedBackgroundMenuFolder_.clear();
-    AppendFallbackBackgroundMenu(screenPoint);
-    return;
-  }
-
-  ComPtr<IContextMenu2> contextMenu2;
-  ComPtr<IContextMenu3> contextMenu3;
-  static_cast<void>(
-      contextMenu->QueryInterface(IID_PPV_ARGS(contextMenu2.AddressOf())));
-  static_cast<void>(
-      contextMenu->QueryInterface(IID_PPV_ARGS(contextMenu3.AddressOf())));
-
-  const UINT selectedCommand = [&] {
-    // Scope guard: HandleMessage forwards WM_INITMENUPOPUP/WM_MENUCHAR/etc.
-    // to these pointers only while they are armed here, and they must be
-    // disarmed before returning on every path, including early returns
-    // added later, so any lingering pointer can't be used after this
-    // function releases it.
-    struct ScopedActiveMenu final {
-      App &app;
-      ScopedActiveMenu(App &app, IContextMenu2 *menu2, IContextMenu3 *menu3)
-          : app(app) {
-        app.activeShellMenu2_ = menu2;
-        app.activeShellMenu3_ = menu3;
-      }
-      ~ScopedActiveMenu() {
-        app.activeShellMenu2_ = nullptr;
-        app.activeShellMenu3_ = nullptr;
-      }
-    } scopedActiveMenu(*this, contextMenu2.Get(), contextMenu3.Get());
-    return TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON,
-                          screenPoint.x, screenPoint.y, 0, window_, nullptr);
-  }();
-
-  if (selectedCommand >= IdShellMenuFirst &&
-      selectedCommand <= IdShellMenuLast) {
-    // lpVerb/lpVerbW must carry the *offset* from idCmdFirst, packed via
-    // MAKEINTRESOURCE, not the raw command ID or a real string pointer;
-    // CMIC_MASK_UNICODE tells the shell to prefer lpVerbW.
-    const UINT_PTR verbOffset = selectedCommand - IdShellMenuFirst;
-    CMINVOKECOMMANDINFOEX invoke{};
-    invoke.cbSize = sizeof(invoke);
-    invoke.fMask = CMIC_MASK_UNICODE;
-    invoke.hwnd = window_;
-    invoke.lpVerb = MAKEINTRESOURCEA(verbOffset);
-    invoke.lpVerbW = MAKEINTRESOURCEW(verbOffset);
-    invoke.nShow = SW_SHOWNORMAL;
-    if (FAILED(contextMenu->InvokeCommand(
-            reinterpret_cast<CMINVOKECOMMANDINFO *>(&invoke)))) {
-      cachedBackgroundMenu_->Release();
-      cachedBackgroundMenu_ = nullptr;
-      cachedBackgroundMenuFolder_.clear();
-    }
-    RefreshPane(activePane_);
-  }
-  // The dynamically populated "New" submenu keeps command state in its menu
-  // items until InvokeCommand returns. Destroying the menu first makes commands
-  // such as "New Folder" fail with E_FAIL.
-  DestroyMenu(menu);
-}
-
-bool App::ShowItemShellMenu(const std::vector<std::wstring> &paths,
-                            POINT screenPoint) {
-  if (paths.empty())
-    return false;
-
-  std::vector<UniquePidl> itemPidls;
-  std::vector<PCUITEMID_CHILD> childPidls;
-  itemPidls.reserve(paths.size());
-  childPidls.reserve(paths.size());
-
-  UniquePidl parentPidl;
-  for (const std::wstring &path : paths) {
-    PIDLIST_ABSOLUTE rawItemPidl = nullptr;
-    if (FAILED(SHParseDisplayName(path.c_str(), nullptr, &rawItemPidl, 0,
-                                  nullptr)) ||
-        rawItemPidl == nullptr) {
-      return false;
-    }
-    UniquePidl itemPidl(rawItemPidl);
-    UniquePidl currentParent(ILCloneFull(itemPidl.get()));
-    if (!currentParent || !ILRemoveLastID(currentParent.get()))
-      return false;
-    if (!parentPidl) {
-      parentPidl.reset(ILCloneFull(currentParent.get()));
-      if (!parentPidl)
-        return false;
-    } else if (!ILIsEqual(parentPidl.get(), currentParent.get())) {
-      // IShellFolder::GetUIObjectOf requires all selected child PIDLs to be
-      // relative to one parent. This can occur for cross-folder search results.
-      return false;
-    }
-
-    childPidls.push_back(ILFindLastID(itemPidl.get()));
-    itemPidls.push_back(std::move(itemPidl));
-  }
-
-  ComPtr<IShellFolder> parentFolder;
-  PCUITEMID_CHILD ignoredChild = nullptr;
-  if (FAILED(SHBindToParent(
-          itemPidls.front().get(), IID_IShellFolder,
-          reinterpret_cast<void **>(parentFolder.AddressOf()),
-          &ignoredChild))) {
-    return false;
-  }
-
-  ComPtr<IContextMenu> contextMenu;
-  if (FAILED(parentFolder->GetUIObjectOf(
-          window_, static_cast<UINT>(childPidls.size()), childPidls.data(),
-          IID_IContextMenu, nullptr,
-          reinterpret_cast<void **>(contextMenu.AddressOf())))) {
-    return false;
-  }
-
-  HMENU menu = CreatePopupMenu();
-  if (menu == nullptr)
-    return false;
-
-  UINT queryFlags = CMF_NORMAL | CMF_ITEMMENU;
-  if (paths.size() == 1)
-    queryFlags |= CMF_CANRENAME;
-  if ((GetKeyState(VK_SHIFT) & 0x8000) != 0)
-    queryFlags |= CMF_EXTENDEDVERBS;
-  if (FAILED(contextMenu->QueryContextMenu(
-          menu, 0, IdShellMenuFirst, IdShellMenuLast, queryFlags))) {
-    DestroyMenu(menu);
-    return false;
-  }
-
-  ComPtr<IContextMenu2> contextMenu2;
-  ComPtr<IContextMenu3> contextMenu3;
-  static_cast<void>(
-      contextMenu->QueryInterface(IID_PPV_ARGS(contextMenu2.AddressOf())));
-  static_cast<void>(
-      contextMenu->QueryInterface(IID_PPV_ARGS(contextMenu3.AddressOf())));
-
-  const UINT selectedCommand = [&] {
-    struct ScopedActiveMenu final {
-      App &app;
-      ScopedActiveMenu(App &app, IContextMenu2 *menu2, IContextMenu3 *menu3)
-          : app(app) {
-        app.activeShellMenu2_ = menu2;
-        app.activeShellMenu3_ = menu3;
-      }
-      ~ScopedActiveMenu() {
-        app.activeShellMenu2_ = nullptr;
-        app.activeShellMenu3_ = nullptr;
-      }
-    } scopedActiveMenu(*this, contextMenu2.Get(), contextMenu3.Get());
-    return TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON,
-                          screenPoint.x, screenPoint.y, 0, window_, nullptr);
-  }();
-
-  bool openInSimpleFiler = false;
-  bool renameInSimpleFiler = false;
-  if (selectedCommand >= IdShellMenuFirst &&
-      selectedCommand <= IdShellMenuLast) {
-    const UINT_PTR verbOffset = selectedCommand - IdShellMenuFirst;
-    std::array<wchar_t, 128> canonicalVerb{};
-    if (SUCCEEDED(contextMenu->GetCommandString(
-            verbOffset, GCS_VERBW, nullptr,
-            reinterpret_cast<char *>(canonicalVerb.data()),
-            static_cast<UINT>(canonicalVerb.size())))) {
-      openInSimpleFiler =
-          paths.size() == 1 && _wcsicmp(canonicalVerb.data(), L"open") == 0;
-      renameInSimpleFiler =
-          paths.size() == 1 && _wcsicmp(canonicalVerb.data(), L"rename") == 0;
-    }
-
-    if (!openInSimpleFiler && !renameInSimpleFiler) {
-      CMINVOKECOMMANDINFOEX invoke{};
-      invoke.cbSize = sizeof(invoke);
-      invoke.fMask = CMIC_MASK_UNICODE | CMIC_MASK_PTINVOKE;
-      if ((GetKeyState(VK_SHIFT) & 0x8000) != 0)
-        invoke.fMask |= CMIC_MASK_SHIFT_DOWN;
-      if ((GetKeyState(VK_CONTROL) & 0x8000) != 0)
-        invoke.fMask |= CMIC_MASK_CONTROL_DOWN;
-      invoke.hwnd = window_;
-      invoke.lpVerb = MAKEINTRESOURCEA(verbOffset);
-      invoke.lpVerbW = MAKEINTRESOURCEW(verbOffset);
-      invoke.nShow = SW_SHOWNORMAL;
-      invoke.ptInvoke = screenPoint;
-      static_cast<void>(contextMenu->InvokeCommand(
-          reinterpret_cast<CMINVOKECOMMANDINFO *>(&invoke)));
-      RefreshPane(activePane_);
-    }
-  }
-
-  // Cascading shell extensions can retain command state in the HMENU until
-  // InvokeCommand has completed.
-  DestroyMenu(menu);
-  if (openInSimpleFiler)
-    OpenSelected();
-  else if (renameInSimpleFiler)
-    BeginRename();
-  return true;
-}
-
-void App::ShowFileMenu(POINT point) {
-  const auto paths = SelectedPaths();
-  if (paths.empty()) {
-    const Pane &pane = panes_[activePane_];
-    const std::wstring folder = pane.searchMode ? pane.searchRoot : pane.path;
-    if (pane.driveView || folder.empty())
-      AppendFallbackBackgroundMenu(point);
-    else
-      ShowBackgroundShellMenu(folder, point);
-    return;
-  }
-  if (ShowItemShellMenu(paths, point))
-    return;
-
-  // Keep the existing commands available if Windows cannot create one shell
-  // context menu (for example, search results selected across parent folders).
-  HMENU menu = CreatePopupMenu();
-  {
-    AppendMenuW(menu, MF_STRING, IdOpen, L"開く");
-
-    HMENU applications = CreatePopupMenu();
-    bool hasApplication = false;
-    for (std::size_t index = 0; index < settings_.links.size(); ++index) {
-      const RegisteredLink &link = settings_.links[index];
-      if (link.type != LinkType::Application ||
-          IdRegisteredAppBase + index > 0x7fff) {
-        continue;
-      }
-      const std::wstring name = Utf8ToWide(link.name);
-      AppendMenuW(applications, MF_STRING, IdRegisteredAppBase + index,
-                  name.c_str());
-      hasApplication = true;
-    }
-    if (!hasApplication)
-      AppendMenuW(applications, MF_STRING | MF_GRAYED, 0,
-                  L"登録アプリなし");
-    AppendMenuW(menu, MF_POPUP,
-                reinterpret_cast<UINT_PTR>(applications),
-                L"登録アプリで開く");
-    AppendMenuW(menu, MF_STRING, IdAddAppLink, L"アプリを登録...");
-    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(menu, MF_STRING, IdCopy, L"コピー");
-    AppendMenuW(menu, MF_STRING, IdCut, L"切り取り");
-    AppendMenuW(menu, MF_STRING, IdRename, L"名前の変更");
-    AppendMenuW(menu, MF_STRING, IdDelete, L"削除");
-    AppendMenuW(menu, MF_STRING, IdProperties, L"プロパティ");
-    if (paths.size() != 1) {
-      EnableMenuItem(menu, IdOpen, MF_BYCOMMAND | MF_GRAYED);
-      EnableMenuItem(menu, IdRename, MF_BYCOMMAND | MF_GRAYED);
-      EnableMenuItem(menu, IdProperties, MF_BYCOMMAND | MF_GRAYED);
-    }
-  }
-
-  const UINT selectedCommand =
-      TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, point.x, point.y,
-                     0, window_, nullptr);
-  DestroyMenu(menu);
-  if (selectedCommand >= IdRegisteredAppBase &&
-      selectedCommand - IdRegisteredAppBase < settings_.links.size()) {
-    commandController_.LaunchRegisteredApplication(
-        window_, settings_, selectedCommand - IdRegisteredAppBase, false, true,
-        BuildAppArgumentContext(true),
-        [this](const std::wstring &message, bool error) {
-          Notify(message, error);
-        });
-  } else if (selectedCommand != 0) {
-    SendMessageW(window_, WM_COMMAND, selectedCommand, 0);
-  }
-}
-
 int App::PaneIndexFromControl(HWND control) const {
   if (control == panes_[0].list || control == panes_[0].address)
     return 0;
@@ -1798,6 +1424,11 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
           Notify(message, error);
         });
   };
+  const ShellMenuIds shellMenuIds{
+      IdAddFolderLink, IdAddFileLink, IdAddAppLink, IdPaste,
+      IdNewFolder,     IdOpen,        IdCopy,       IdCut,
+      IdRename,        IdDelete,      IdProperties, IdRegisteredAppBase,
+      IdShellMenuFirst, IdShellMenuLast};
 
   switch (message) {
   case WM_SYSCOMMAND:
@@ -1962,11 +1593,10 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
         DrawFocusRect(item->hDC, &row);
       return TRUE;
     }
-    if (activeShellMenu2_ != nullptr &&
-        SUCCEEDED(
-            activeShellMenu2_->HandleMenuMsg(message, wParam, lParam))) {
-      return 0;
-    }
+    LRESULT shellMenuResult = 0;
+    if (shellMenuController_.HandleMenuMessage(message, wParam, lParam,
+                                               shellMenuResult))
+      return shellMenuResult;
     break;
   }
   case WM_CTLCOLOREDIT: {
@@ -2142,7 +1772,7 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
           [this] { SaveSettings(); });
       break;
     case IdAddLink:
-      ShowLinkMenu(toolbar_[4]);
+      shellMenuController_.ShowLinkMenu(window_, toolbar_[4], shellMenuIds);
       break;
     case IdAddFolderLink:
       sidebarController_.AddLinkedFolder(
@@ -2390,7 +2020,14 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
         }
         POINT point{};
         GetCursorPos(&point);
-        ShowFileMenu(point);
+        shellMenuController_.ShowFileMenu(
+            window_, point, SelectedPaths(),
+            pane.searchMode ? pane.searchRoot : pane.path, pane.driveView,
+            settings_, shellMenuIds, [this] { RefreshPane(activePane_); },
+            [this] { OpenSelected(); }, [this] { BeginRename(); },
+            [&launchRegisteredApplication](std::size_t index) {
+              launchRegisteredApplication(index, false, true);
+            });
         PostMessageW(window_, kMessageRestoreFocus, 0, 0);
       } else if (header->code == LVN_KEYDOWN) {
         const auto *key = reinterpret_cast<NMLVKEYDOWN *>(lParam);
@@ -2633,21 +2270,11 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
   case WM_INITMENUPOPUP:
   case WM_UNINITMENUPOPUP:
   case WM_MEASUREITEM:
-    // activeShellMenu2_ is only non-null while a shell TrackPopupMenu call is
-    // modal, so no other popup menu can be active at the same time.
-    if (activeShellMenu2_ != nullptr &&
-        SUCCEEDED(activeShellMenu2_->HandleMenuMsg(message, wParam, lParam))) {
-      return 0;
-    }
-    break;
   case WM_MENUCHAR: {
-    if (activeShellMenu3_ != nullptr) {
-      LRESULT result = 0;
-      if (SUCCEEDED(activeShellMenu3_->HandleMenuMsg2(message, wParam, lParam,
-                                                       &result))) {
-        return result;
-      }
-    }
+    LRESULT shellMenuResult = 0;
+    if (shellMenuController_.HandleMenuMessage(message, wParam, lParam,
+                                               shellMenuResult))
+      return shellMenuResult;
     break;
   }
   }

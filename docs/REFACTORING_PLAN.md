@@ -380,13 +380,18 @@ Phase 2完了後の`App.cpp`を再調査した。候補リストとプレフィ�
 
 ---
 
-## Phase 4: ShellMenuController の切り出し（次回実装対象・詳細計画）
+## Phase 4: ShellMenuController の切り出し（実装済み）
 
 Phase 3完了後の実装を再調査した。シェル拡張が生成するメニューは表示中だけ
 `IContextMenu2`/`IContextMenu3`へWindowsメッセージを転送する必要があり、
 背景メニューは「新規作成」などの動的状態を維持するためフォルダー単位で
 `IContextMenu`をキャッシュしている。このCOM状態と転送処理を同じコントローラーへ
 まとめる。
+
+実装日: 2026-07-30。シェルメニュー生成、シェル拡張へのメッセージ転送、
+背景メニューのCOMキャッシュと専用COM/PIDLヘルパーを`ShellMenuController`へ移した。
+`App`はコマンドID・選択パス・実効フォルダーとコールバックを渡すだけになり、
+Windows x64 Releaseビルドと全CTest（UIスモークを含む6件）の通過を確認済み。
 
 ### 対象と所有状態
 
@@ -446,16 +451,108 @@ Phase 3完了後の実装を再調査した。シェル拡張が生成するメ�
 
 ---
 
-## Phase 5以降（概要・未詳細化）
+## Phase 5以降
 
-### Phase 5: ナビゲーション・ファイル操作（最終）
+### Phase 5: PaneController / FileOperationController の切り出し（次回実装対象・詳細計画）
+
+Phase 4完了後の`App`を再調査した。ナビゲーションだけを移しても、非同期列挙結果、
+仮想リスト表示、選択復元、検索中止、設定の読み書きが`Pane`の内部状態を直接更新するため、
+`Pane`の所有権が`App`に残ってしまう。一方、コピー・移動・削除などはペイン状態そのものを
+所有する必要はなく、操作開始数と完了通知だけが共通状態である。このためPhase 5では
+`PaneController`と`FileOperationController`に分ける。
+
+#### PaneControllerの対象と所有状態
 
 - 対象: `Navigate`, `NavigateHistory`, `NavigateUp`, `ShowDrives`, `RefreshPane`,
   `StartSearch`, `SortPane`, `RetireWorker`, `FinishWorker`, `OpenSelected`,
-  `BeginRename`, `CopySelection`, `TransferSelectionToOtherPane`, `Paste`,
-  `DeleteSelection`, `NewFolder`, `ShowSelectedProperties`, `SelectedPaths`
-- `Pane`構造体の実質的な所有者。他の全グループから参照されるため、最後に着手する
-  (依存元が先に整理されていることが前提)。
+  `BeginRename`, `SelectedPaths`, `ActivePaneEffectivePath`
+- `Pane`と`Pane::RetiredWorker`、左右2ペインの配列を`PaneController`へ移す。
+- パス、検索条件、ドライブ表示、busy、隠しファイル表示、ソート、履歴、
+  `FileItem`、generation、実行中・退役済み`jthread`を一括して所有する。
+- `PaneController`のデストラクタで現行・退役workerへ停止を要求する。
+- アドレス欄とリストの`HWND`はウィンドウ生成・レイアウトを担う`App`が作成し、
+  `AttachControls(pane, address, list)`で非所有参照として登録する。
+- `AddressHandle`、`ListHandle`、`PaneIndexFromControl`の小さなアクセサーを公開し、
+  `App`のレイアウト、DPI、フォーカス処理は引き続きハンドルだけを扱う。
+- `ApplyPaneSettings`/`WritePaneSettings`で`showHidden`・ソート・現在パスを受け渡しし、
+  `App`から内部状態への直接アクセスをなくす。
+
+#### 列挙・検索・リスト通知
+
+- `kMessageEnumerationBatch`と`kMessageEnumerationDone`は
+  `HandleEnumerationBatch`/`HandleEnumerationDone`へ委譲する。
+  generation判定、item追加、worker回収、ソート、ListView更新までコントローラー内で行う。
+- `LVN_GETDISPINFO`の`FileItem`参照と`LVN_COLUMNCLICK`のソート状態更新も委譲する。
+  `App`が`items`を直接読む経路を残さない。
+- `LVN_ENDLABELEDIT`だけは確定した「元パス・新しい名前」を
+  `FileOperationController::RenameItem`へ渡す必要があるため、
+  `PaneController::ItemPath(pane, index)`で不変のパス値を取得する。
+- 検索中止を`CancelSearch(pane)`として追加し、現在`WM_COMMAND`内にある
+  worker停止・generation更新・busy解除を移す。
+- 検索開始/終了時の検索ボタン表示と通知は`SearchStateFn`/`NotifyFn`で`App`へ返す。
+  検索欄自体はコマンドパレットと共有するため`App`に残す。
+
+#### FileOperationControllerの対象と所有状態
+
+- 対象: `CopySelection`, `TransferSelectionToOtherPane`, `Paste`,
+  `DeleteSelection`, `NewFolder`, `ShowSelectedProperties`とラベル編集後のrename開始。
+- `pendingFileOperations_`を移し、`PendingOperationCount()`を公開する。
+- 各操作は`Pane`を参照せず、選択パス、コピー先/実効フォルダー、2ペイン表示状態を
+  値として受け取る。選択とフォルダーのスナップショットは`App`が
+  `PaneController`から取得して渡す。
+- `NewFolder`は`PromptTextFn`を受け取り、名前の空判定・禁止文字検証・非同期開始を
+  コントローラー内で行う。
+- `HandleOperationDone(LPARAM, NotifyFn, RefreshPaneFn)`で結果オブジェクトを回収し、
+  pending数の減算、通知、成功時の左右ペイン更新を行う。
+- 操作後のフォーカス復元はウィンドウ全体の責務なので`App`に残す。
+
+#### 依存方向と呼び出し元
+
+- `PaneController`/`FileOperationController`に`App&`や他コントローラーを渡さない。
+  `HWND`、値、通知/状態更新コールバックだけを操作時に渡す。
+- `BuildAppArgumentContext`は複数コントローラーを接続する小さな組み立て処理として
+  `App`に残し、`PaneController`の選択パス・左右の実効フォルダーから構築する。
+- `CommandController`、`SidebarController`、`TerminalController`,
+  `ShellMenuController`、`ZipController`への既存コールバックは、
+  `App`経由で`PaneController`の公開操作・アクセサーへつなぎ替える。
+- `WM_COMMAND`の移動・更新・検索・ファイル操作、アドレス確定、
+  リストのダブルクリック/Enter/右クリック、列挙・操作完了メッセージを委譲する。
+- `WM_CLOSE`の進行中件数は
+  `fileOperationController_.PendingOperationCount()`と
+  `zipController_.PendingOperationCount()`を合算する。
+
+#### 新規・変更ファイル
+
+- `src/win/PaneController.h` / `.cpp`を追加する。
+- `src/win/FileOperationController.h` / `.cpp`を追加する。
+- `App.h`から`Pane`、対象メソッド、`panes_`、`pendingFileOperations_`を削除し、
+  2コントローラーのメンバーを追加する。
+- `App.cpp`の対象実装と列挙/操作完了処理を移し、直接委譲へ変更する。
+- `CMakeLists.txt`へ新しい`.cpp` 2ファイルを追加する。
+
+#### 実装順序
+
+1. `FileOperationController`を追加し、ファイル操作とpending数、完了メッセージを移す。
+   この時点では`App::SelectedPaths`と実効フォルダーを引数として渡す。
+2. `PaneController`へ`Pane`とworker寿命管理、選択・実効パスの読み取りを移す。
+   `App`のコントロール生成・レイアウトをハンドルアクセサーへ置き換える。
+3. ナビゲーション、ドライブ一覧、履歴、更新、検索開始/中止を移す。
+4. 列挙batch/doneとソート、仮想リスト表示、選択復元を移す。
+5. `OpenSelected`/`BeginRename`と各コントローラーのコールバックを接続する。
+6. `App`に残る`panes_`/`Pane`/worker/item直接参照がゼロであることを`rg`で確認し、
+   不要includeを削除して全体を検証する。
+
+#### 検証
+
+1. 通常フォルダー・ドライブ一覧・戻る/進む/上へ・左右ペイン・履歴分岐。
+2. 通常列挙と検索の開始/中止/再実行、古いgenerationの結果破棄、終了時worker回収。
+3. 名前・サイズ・更新日時の昇降順、ソート後の選択・フォーカス復元。
+4. 隠しファイル表示、設定保存と再起動後のパス・ソート状態復元。
+5. 開く、rename、新規フォルダー、コピー/切り取り/貼り付け、反対ペインへの
+   コピー/移動、通常/完全削除、プロパティ。
+6. ファイル操作完了/失敗/キャンセル通知、成功時の両ペイン更新、
+   操作中終了警告。
+7. Windows x64 Releaseビルドと全CTest（UIスモークを含む）。
 
 ### Phase 6: ウィンドウ管理・メッセージループの整理（最終仕上げ）
 

@@ -4,12 +4,11 @@
 #include "win/CommandController.h"
 #include "win/FileEnumerator.h"
 #include "win/SidebarController.h"
+#include "win/ShellMenuController.h"
 #include "win/TerminalController.h"
 #include "win/ZipController.h"
 
 #include <windows.h>
-
-#include <shobjidl.h>
 
 #include <cstdint>
 #include <filesystem>
@@ -87,14 +86,6 @@ private:
   void DeleteSelection(bool permanent);
   void NewFolder();
   void ShowSelectedProperties();
-  void ShowFileMenu(POINT screenPoint);
-  [[nodiscard]] bool
-  ShowItemShellMenu(const std::vector<std::wstring> &paths,
-                    POINT screenPoint);
-  void ShowBackgroundShellMenu(const std::wstring &folderPath,
-                               POINT screenPoint);
-  void AppendFallbackBackgroundMenu(POINT screenPoint);
-  void ShowLinkMenu(HWND sourceButton);
   void ShowAboutDialog();
 
   [[nodiscard]] std::vector<std::wstring> SelectedPaths() const;
@@ -134,15 +125,12 @@ private:
   std::size_t pendingFileOperations_ = 0;
   CommandController commandController_;
   SidebarController sidebarController_;
+  ShellMenuController shellMenuController_;
   ZipController zipController_;
   TerminalController terminalController_;
   double splitRatio_ = 0.5;
   AppSettings settings_;
   SettingsStore settingsStore_;
-  IContextMenu2 *activeShellMenu2_ = nullptr;
-  IContextMenu3 *activeShellMenu3_ = nullptr;
-  std::wstring cachedBackgroundMenuFolder_;
-  IContextMenu *cachedBackgroundMenu_ = nullptr;
 };
 
 } // namespace sf::win
