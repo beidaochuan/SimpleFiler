@@ -143,11 +143,18 @@ private:
   HWND searchEdit_ = nullptr;
   HWND commandSuggestions_ = nullptr;
   HWND sidebar_ = nullptr;
+  HWND sidebarTitle_ = nullptr;
   HWND status_ = nullptr;
   HACCEL accelerators_ = nullptr;
+  HBRUSH backgroundBrush_ = nullptr;
+  HBRUSH surfaceBrush_ = nullptr;
+  HBRUSH sidebarBrush_ = nullptr;
   HBRUSH activePaneBrush_ = nullptr;
   HFONT uiFont_ = nullptr;
+  HFONT sectionFont_ = nullptr;
   UINT dpi_ = USER_DEFAULT_SCREEN_DPI;
+  RECT sidebarCardRect_{};
+  RECT paneCardRects_[2]{};
   Pane panes_[2];
   int activePane_ = 0;
   bool twoPanes_ = true;

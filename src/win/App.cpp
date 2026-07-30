@@ -13,6 +13,7 @@
 #include <shellapi.h>
 #include <shlobj.h>
 #include <shlwapi.h>
+#include <uxtheme.h>
 #include <windowsx.h>
 
 #include <algorithm>
@@ -32,11 +33,23 @@ namespace {
 
 constexpr wchar_t kWindowClass[] = L"SimpleFiler.MainWindow";
 constexpr wchar_t kPromptClass[] = L"SimpleFiler.PromptWindow";
-constexpr int kToolbarHeight = 38;
-constexpr int kAddressHeight = 28;
-constexpr int kStatusHeight = 24;
-constexpr int kSidebarWidth = 210;
-constexpr int kSplitterWidth = 6;
+constexpr wchar_t kCommandCueText[] =
+    L"コマンド / 検索  (ff フォルダー・aa アプリ・cmd 端末)";
+constexpr int kToolbarHeight = 50;
+constexpr int kAddressHeight = 22;
+constexpr int kStatusHeight = 30;
+constexpr int kSidebarWidth = 165;
+constexpr int kSplitterWidth = 10;
+constexpr COLORREF kBackgroundColor = RGB(244, 247, 251);
+constexpr COLORREF kSurfaceColor = RGB(255, 255, 255);
+constexpr COLORREF kSidebarColor = RGB(248, 250, 252);
+constexpr COLORREF kActivePaneColor = RGB(247, 250, 255);
+constexpr COLORREF kBorderColor = RGB(218, 225, 235);
+constexpr COLORREF kTextColor = RGB(30, 41, 59);
+constexpr COLORREF kMutedTextColor = RGB(100, 116, 139);
+constexpr COLORREF kAccentColor = RGB(37, 99, 235);
+constexpr COLORREF kAccentPressedColor = RGB(29, 78, 216);
+constexpr COLORREF kAccentSoftColor = RGB(219, 234, 254);
 
 enum ControlId : int {
   IdBack = 100,
@@ -167,6 +180,34 @@ LRESULT CALLBACK PromptProcedure(HWND window, UINT message, WPARAM wParam,
 
 LRESULT CALLBACK EditSubclass(HWND window, UINT message, WPARAM wParam,
                               LPARAM lParam, UINT_PTR, DWORD_PTR reference) {
+  if (message == WM_PAINT && reference == 2) {
+    const LRESULT result = DefSubclassProc(window, message, wParam, lParam);
+    if (GetWindowTextLengthW(window) == 0) {
+      HDC dc = GetDC(window);
+      if (dc != nullptr) {
+        RECT cueRect{};
+        GetClientRect(window, &cueRect);
+        const UINT dpi = GetDpiForWindow(window);
+        cueRect.left +=
+            MulDiv(8, static_cast<int>(dpi), USER_DEFAULT_SCREEN_DPI);
+        cueRect.right -=
+            MulDiv(6, static_cast<int>(dpi), USER_DEFAULT_SCREEN_DPI);
+        const HFONT font =
+            reinterpret_cast<HFONT>(SendMessageW(window, WM_GETFONT, 0, 0));
+        const HGDIOBJ oldFont =
+            font != nullptr ? SelectObject(dc, font) : nullptr;
+        SetBkMode(dc, TRANSPARENT);
+        SetTextColor(dc, kMutedTextColor);
+        DrawTextW(dc, kCommandCueText, -1, &cueRect,
+                  DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS |
+                      DT_NOPREFIX);
+        if (oldFont != nullptr)
+          SelectObject(dc, oldFont);
+        ReleaseDC(window, dc);
+      }
+    }
+    return result;
+  }
   if (message == WM_KEYDOWN) {
     if (reference == 2) {
       if (wParam == L'N' && (GetKeyState(VK_CONTROL) & 0x8000) != 0) {
@@ -372,11 +413,41 @@ HFONT CreateUiFont(UINT dpi) {
   return CreateFontIndirectW(&metrics.lfMessageFont);
 }
 
+HFONT CreateSectionFont(HFONT baseFont) {
+  LOGFONTW font{};
+  if (baseFont == nullptr ||
+      GetObjectW(baseFont, sizeof(font), &font) != sizeof(font)) {
+    return nullptr;
+  }
+  font.lfWeight = FW_SEMIBOLD;
+  return CreateFontIndirectW(&font);
+}
+
+void DrawRoundedSurface(HDC dc, RECT rect, COLORREF fill, COLORREF border,
+                        int radius) {
+  HBRUSH brush = CreateSolidBrush(fill);
+  HPEN pen = CreatePen(PS_SOLID, 1, border);
+  const HGDIOBJ oldBrush = SelectObject(dc, brush);
+  const HGDIOBJ oldPen = SelectObject(dc, pen);
+  RoundRect(dc, rect.left, rect.top, rect.right, rect.bottom, radius, radius);
+  SelectObject(dc, oldPen);
+  SelectObject(dc, oldBrush);
+  DeleteObject(pen);
+  DeleteObject(brush);
+}
+
+bool IsRectVisible(const RECT &rect) {
+  return rect.right > rect.left && rect.bottom > rect.top;
+}
+
 } // namespace
 
 App::App(HINSTANCE instance)
     : instance_(instance),
-      activePaneBrush_(CreateSolidBrush(RGB(238, 246, 255))),
+      backgroundBrush_(CreateSolidBrush(kBackgroundColor)),
+      surfaceBrush_(CreateSolidBrush(kSurfaceColor)),
+      sidebarBrush_(CreateSolidBrush(kSidebarColor)),
+      activePaneBrush_(CreateSolidBrush(kActivePaneColor)),
       settingsStore_(ExecutablePath().parent_path() / L"simplefiler.json") {}
 
 App::~App() {
@@ -390,8 +461,16 @@ App::~App() {
   }
   if (accelerators_ != nullptr)
     DestroyAcceleratorTable(accelerators_);
+  if (backgroundBrush_ != nullptr)
+    DeleteObject(backgroundBrush_);
+  if (surfaceBrush_ != nullptr)
+    DeleteObject(surfaceBrush_);
+  if (sidebarBrush_ != nullptr)
+    DeleteObject(sidebarBrush_);
   if (activePaneBrush_ != nullptr)
     DeleteObject(activePaneBrush_);
+  if (sectionFont_ != nullptr)
+    DeleteObject(sectionFont_);
   if (uiFont_ != nullptr)
     DeleteObject(uiFont_);
 }
@@ -424,7 +503,7 @@ bool App::RegisterClasses() {
   mainClass.hIcon = LoadIconW(instance_, MAKEINTRESOURCEW(1));
   if (mainClass.hIcon == nullptr)
     mainClass.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
-  mainClass.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+  mainClass.hbrBackground = nullptr;
   mainClass.lpszClassName = kWindowClass;
   if (!RegisterClassExW(&mainClass) &&
       GetLastError() != ERROR_CLASS_ALREADY_EXISTS) {
@@ -451,7 +530,8 @@ bool App::CreateMainWindow(int showCommand) {
 
   const int x = settings_.windowX < 0 ? CW_USEDEFAULT : settings_.windowX;
   const int y = settings_.windowY < 0 ? CW_USEDEFAULT : settings_.windowY;
-  window_ = CreateWindowExW(0, kWindowClass, L"SimpleFiler",
+  window_ = CreateWindowExW(0, kWindowClass,
+                            L"SimpleFiler — 2ペイン ファイルマネージャー",
                             WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, x, y,
                             settings_.windowWidth, settings_.windowHeight,
                             nullptr, nullptr, instance_, this);
@@ -470,6 +550,7 @@ bool App::CreateMainWindow(int showCommand) {
 void App::CreateControls() {
   dpi_ = GetDpiForWindow(window_);
   uiFont_ = CreateUiFont(dpi_);
+  sectionFont_ = CreateSectionFont(uiFont_);
   const HFONT font =
       uiFont_ != nullptr
           ? uiFont_
@@ -477,14 +558,14 @@ void App::CreateControls() {
   const std::array<std::pair<const wchar_t *, int>, 6> buttons{
       {{L"PC", IdDrives},
        {L"1｜2", IdTogglePanes},
-       {L"登録", IdToggleSidebar},
-       {L"★追加", IdAddBookmark},
-       {L"リンク＋", IdAddLink},
-       {L"端末", IdTerminal}}};
+       {L"サイド", IdToggleSidebar},
+       {L"★ 追加", IdAddBookmark},
+       {L"リンク ▾", IdAddLink},
+       {L"端末 ▾", IdTerminal}}};
   for (std::size_t index = 0; index < buttons.size(); ++index) {
     toolbar_[index] = CreateWindowExW(
         0, L"BUTTON", buttons[index].first,
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON, 0, 0, 10, 10,
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW, 0, 0, 10, 10,
         window_,
         reinterpret_cast<HMENU>(static_cast<INT_PTR>(buttons[index].second)),
         instance_, nullptr);
@@ -496,20 +577,35 @@ void App::CreateControls() {
       WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL, 0, 0, 10, 10,
       window_, reinterpret_cast<HMENU>(IdSearchEdit), instance_, nullptr);
   SendMessageW(searchEdit_, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
-  SendMessageW(searchEdit_, EM_SETCUEBANNER, TRUE,
-               reinterpret_cast<LPARAM>(
-                   L"ff フォルダー / aa アプリ / cmd"));
+  SendMessageW(
+      searchEdit_, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN,
+      MAKELPARAM(MulDiv(8, static_cast<int>(dpi_), USER_DEFAULT_SCREEN_DPI),
+                 MulDiv(6, static_cast<int>(dpi_),
+                        USER_DEFAULT_SCREEN_DPI)));
   SetWindowSubclass(searchEdit_, EditSubclass, 1, 2);
   toolbar_[6] = CreateWindowExW(
-      0, L"BUTTON", L"実行", WS_CHILD | WS_VISIBLE | WS_TABSTOP, 0, 0, 10, 10,
+      0, L"BUTTON", L"実行",
+      WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW, 0, 0, 10, 10,
       window_, reinterpret_cast<HMENU>(IdSearch), instance_, nullptr);
   SendMessageW(toolbar_[6], WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
 
+  sidebarTitle_ = CreateWindowExW(
+      0, L"STATIC", L"★  クイックアクセス",
+      WS_CHILD | WS_VISIBLE | SS_LEFT, 0, 0, 10, 10, window_, nullptr,
+      instance_, nullptr);
+  SendMessageW(sidebarTitle_, WM_SETFONT,
+               reinterpret_cast<WPARAM>(sectionFont_ != nullptr ? sectionFont_
+                                                                : font),
+               TRUE);
   sidebar_ = CreateWindowExW(
-      WS_EX_CLIENTEDGE, WC_LISTBOXW, L"",
-      WS_CHILD | WS_VISIBLE | WS_TABSTOP | LBS_NOTIFY | WS_VSCROLL, 0, 0, 10,
-      10, window_, reinterpret_cast<HMENU>(IdSidebar), instance_, nullptr);
+      0, WC_LISTBOXW, L"",
+      WS_CHILD | WS_VISIBLE | WS_TABSTOP | LBS_NOTIFY | WS_VSCROLL |
+          LBS_OWNERDRAWFIXED | LBS_HASSTRINGS | LBS_NOINTEGRALHEIGHT,
+      0, 0, 10, 10, window_, reinterpret_cast<HMENU>(IdSidebar), instance_,
+      nullptr);
   SendMessageW(sidebar_, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+  SendMessageW(sidebar_, LB_SETITEMHEIGHT, 0,
+               MulDiv(28, static_cast<int>(dpi_), USER_DEFAULT_SCREEN_DPI));
   SetWindowSubclass(sidebar_, ListSubclass, 1, 1);
 
   CreatePaneControls(0);
@@ -522,7 +618,7 @@ void App::CreateControls() {
   SendMessageW(commandSuggestions_, WM_SETFONT,
                reinterpret_cast<WPARAM>(font), TRUE);
   SetWindowSubclass(commandSuggestions_, SuggestionSubclass, 1, 0);
-  status_ = CreateWindowExW(0, L"STATIC", L"準備完了",
+  status_ = CreateWindowExW(0, L"STATIC", L"●  準備完了",
                             WS_CHILD | WS_VISIBLE | SS_LEFT, 0, 0, 10, 10,
                             window_, nullptr, instance_, nullptr);
   SendMessageW(status_, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
@@ -569,7 +665,10 @@ void App::CreatePaneControls(int paneIndex) {
   SendMessageW(pane.list, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
   SetWindowSubclass(pane.list, ListSubclass, 1, 0);
   ListView_SetExtendedListViewStyle(
-      pane.list, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER | LVS_EX_LABELTIP);
+      pane.list, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER | LVS_EX_LABELTIP |
+                     LVS_EX_HEADERDRAGDROP);
+  ListView_SetTextColor(pane.list, kTextColor);
+  SetWindowTheme(pane.list, L"Explorer", nullptr);
   const std::array<std::pair<const wchar_t *, int>, 3> columns{
       {{L"名前", 300}, {L"サイズ", 100}, {L"更新日時", 140}}};
   for (int column = 0; column < static_cast<int>(columns.size()); ++column) {
@@ -582,44 +681,73 @@ void App::CreatePaneControls(int paneIndex) {
     value.iSubItem = column;
     ListView_InsertColumn(pane.list, column, &value);
   }
+  const HWND listHeader = ListView_GetHeader(pane.list);
+  if (listHeader != nullptr && sectionFont_ != nullptr) {
+    SendMessageW(listHeader, WM_SETFONT,
+                 reinterpret_cast<WPARAM>(sectionFont_), TRUE);
+  }
 }
 
 void App::LayoutControls(int width, int height) {
   const auto scale = [this](int value) {
     return MulDiv(value, static_cast<int>(dpi_), USER_DEFAULT_SCREEN_DPI);
   };
-  const int gap = scale(4);
+  const int gap = scale(10);
+  const int cardInset = scale(6);
+  const int sidebarTitleHeight = scale(26);
   const int toolbarHeight = scale(kToolbarHeight);
   const int addressHeight = scale(kAddressHeight);
   const int statusHeight = scale(kStatusHeight);
   const int splitterWidth = scale(kSplitterWidth);
   int x = gap;
-  const std::array<int, 6> buttonWidths{42, 52, 54, 58, 66, 54};
+  const int buttonHeight = scale(32);
+  const int searchHeight = scale(30);
+  const int buttonTop = (toolbarHeight - buttonHeight) / 2;
+  const int searchTop = (toolbarHeight - searchHeight) / 2;
+  const int buttonGap = scale(7);
+  const std::array<int, 6> buttonWidths{56, 56, 64, 68, 74, 68};
   for (std::size_t index = 0; index < buttonWidths.size(); ++index) {
     const int buttonWidth = scale(buttonWidths[index]);
-    MoveWindow(toolbar_[index], x, gap, buttonWidth, scale(30), TRUE);
-    x += buttonWidth + gap;
+    MoveWindow(toolbar_[index], x, buttonTop, buttonWidth, buttonHeight, TRUE);
+    x += buttonWidth;
+    if (index + 1 < buttonWidths.size())
+      x += buttonGap;
   }
-  const int searchButtonWidth = scale(50);
+  x += scale(12);
+  const int searchButtonWidth = scale(60);
+  const int searchGap = scale(8);
   const int searchWidth =
-      std::max(scale(100), width - x - searchButtonWidth - gap * 3);
-  MoveWindow(searchEdit_, x, gap + scale(2), searchWidth, scale(26), TRUE);
-  MoveWindow(toolbar_[6], x + searchWidth + gap, gap, searchButtonWidth,
-             scale(30), TRUE);
+      std::max(scale(100), width - x - searchButtonWidth - gap - searchGap);
+  MoveWindow(searchEdit_, x, searchTop, searchWidth, searchHeight, TRUE);
+  MoveWindow(toolbar_[6], x + searchWidth + searchGap, buttonTop,
+             searchButtonWidth, buttonHeight, TRUE);
   MoveWindow(commandSuggestions_, x, toolbarHeight,
-             searchWidth + gap + searchButtonWidth, scale(220), TRUE);
+             searchWidth + searchGap + searchButtonWidth, scale(220), TRUE);
 
-  const int contentTop = toolbarHeight;
-  const int contentBottom = std::max(contentTop, height - statusHeight);
+  const int contentTop = toolbarHeight + gap;
+  const int contentBottom =
+      std::max(contentTop, height - statusHeight - scale(4));
   const int contentHeight = contentBottom - contentTop;
   const int sidebarWidth =
       sidebarVisible_ ? std::min(scale(kSidebarWidth), width / 3) : 0;
   ShowWindow(sidebar_, sidebarVisible_ ? SW_SHOW : SW_HIDE);
+  ShowWindow(sidebarTitle_, sidebarVisible_ ? SW_SHOW : SW_HIDE);
   if (sidebarVisible_) {
-    MoveWindow(sidebar_, gap, contentTop, sidebarWidth - gap, contentHeight,
+    sidebarCardRect_ = {gap, contentTop, gap + sidebarWidth, contentBottom};
+    MoveWindow(sidebarTitle_, sidebarCardRect_.left + scale(12),
+               sidebarCardRect_.top + scale(7),
+               sidebarWidth - scale(24), scale(20), TRUE);
+    MoveWindow(sidebar_, sidebarCardRect_.left + cardInset,
+               sidebarCardRect_.top + sidebarTitleHeight,
+               sidebarWidth - cardInset * 2,
+               std::max(0,
+                        contentHeight - sidebarTitleHeight - cardInset),
                TRUE);
+  } else {
+    sidebarCardRect_ = {};
   }
-  const int paneLeft = sidebarWidth + gap;
+  const int paneLeft =
+      sidebarVisible_ ? gap + sidebarWidth + gap : gap;
   const int paneWidth = std::max(0, width - paneLeft - gap);
   int leftWidth = paneWidth;
   int rightLeft = width;
@@ -630,20 +758,38 @@ void App::LayoutControls(int width, int height) {
     rightWidth = width - rightLeft - gap;
   }
 
-  MoveWindow(panes_[0].address, paneLeft, contentTop, leftWidth, addressHeight,
+  paneCardRects_[0] = {paneLeft, contentTop, paneLeft + leftWidth,
+                       contentBottom};
+  MoveWindow(panes_[0].address, paneLeft + cardInset,
+             contentTop + cardInset, std::max(0, leftWidth - cardInset * 2),
+             addressHeight, TRUE);
+  MoveWindow(panes_[0].list, paneLeft + cardInset,
+             contentTop + cardInset + addressHeight + scale(5),
+             std::max(0, leftWidth - cardInset * 2),
+             std::max(0, contentHeight - addressHeight - cardInset * 2 -
+                             scale(5)),
              TRUE);
-  MoveWindow(panes_[0].list, paneLeft, contentTop + addressHeight, leftWidth,
-             contentHeight - addressHeight, TRUE);
   ShowWindow(panes_[1].address, twoPanes_ ? SW_SHOW : SW_HIDE);
   ShowWindow(panes_[1].list, twoPanes_ ? SW_SHOW : SW_HIDE);
   if (twoPanes_) {
-    MoveWindow(panes_[1].address, rightLeft, contentTop, rightWidth,
-               addressHeight, TRUE);
-    MoveWindow(panes_[1].list, rightLeft, contentTop + addressHeight,
-               rightWidth, contentHeight - addressHeight, TRUE);
+    paneCardRects_[1] = {rightLeft, contentTop, rightLeft + rightWidth,
+                         contentBottom};
+    MoveWindow(panes_[1].address, rightLeft + cardInset,
+               contentTop + cardInset,
+               std::max(0, rightWidth - cardInset * 2), addressHeight, TRUE);
+    MoveWindow(panes_[1].list, rightLeft + cardInset,
+               contentTop + cardInset + addressHeight + scale(5),
+               std::max(0, rightWidth - cardInset * 2),
+               std::max(0, contentHeight - addressHeight - cardInset * 2 -
+                               scale(5)),
+               TRUE);
+  } else {
+    paneCardRects_[1] = {};
   }
-  MoveWindow(status_, gap, height - statusHeight + scale(3),
-             std::max(0, width - gap * 2), statusHeight - scale(3), TRUE);
+  MoveWindow(status_, gap + scale(4), height - statusHeight + scale(5),
+             std::max(0, width - gap * 2 - scale(8)),
+             statusHeight - scale(5), TRUE);
+  InvalidateRect(window_, nullptr, TRUE);
 }
 
 void App::ApplyDpi(UINT dpi) {
@@ -652,6 +798,7 @@ void App::ApplyDpi(UINT dpi) {
   dpi_ = dpi;
   HFONT newFont = CreateUiFont(dpi_);
   if (newFont != nullptr) {
+    HFONT newSectionFont = CreateSectionFont(newFont);
     for (HWND control : toolbar_) {
       if (control != nullptr)
         SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(newFont),
@@ -664,10 +811,29 @@ void App::ApplyDpi(UINT dpi) {
         SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(newFont),
                      TRUE);
     }
+    for (HWND control : {sidebarTitle_}) {
+      if (control != nullptr)
+        SendMessageW(
+            control, WM_SETFONT,
+            reinterpret_cast<WPARAM>(newSectionFont != nullptr
+                                         ? newSectionFont
+                                         : newFont),
+            TRUE);
+    }
+    if (sectionFont_ != nullptr)
+      DeleteObject(sectionFont_);
+    sectionFont_ = newSectionFont;
     if (uiFont_ != nullptr)
       DeleteObject(uiFont_);
     uiFont_ = newFont;
   }
+  SendMessageW(sidebar_, LB_SETITEMHEIGHT, 0,
+               MulDiv(28, static_cast<int>(dpi_), USER_DEFAULT_SCREEN_DPI));
+  SendMessageW(
+      searchEdit_, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN,
+      MAKELPARAM(MulDiv(8, static_cast<int>(dpi_), USER_DEFAULT_SCREEN_DPI),
+                 MulDiv(6, static_cast<int>(dpi_),
+                        USER_DEFAULT_SCREEN_DPI)));
   const std::array<int, 3> columnWidths{300, 100, 140};
   for (Pane &pane : panes_) {
     for (int column = 0; column < static_cast<int>(columnWidths.size());
@@ -681,16 +847,15 @@ void App::ApplyDpi(UINT dpi) {
 }
 
 void App::UpdateActivePaneVisuals() {
-  constexpr COLORREF activeBackground = RGB(246, 250, 255);
-  const COLORREF inactiveBackground = GetSysColor(COLOR_WINDOW);
   for (int index = 0; index < 2; ++index) {
     const COLORREF background =
-        index == activePane_ ? activeBackground : inactiveBackground;
+        index == activePane_ ? kActivePaneColor : kSurfaceColor;
     ListView_SetBkColor(panes_[index].list, background);
     ListView_SetTextBkColor(panes_[index].list, background);
     InvalidateRect(panes_[index].list, nullptr, FALSE);
     InvalidateRect(panes_[index].address, nullptr, TRUE);
   }
+  InvalidateRect(window_, nullptr, FALSE);
 }
 
 void App::RestorePaneFocusIfNeeded() {
@@ -2175,7 +2340,8 @@ std::wstring App::PromptText(const std::wstring &title,
 }
 
 void App::Notify(const std::wstring &message, bool error) {
-  SetWindowTextW(status_, (error ? L"⚠ " + message : message).c_str());
+  SetWindowTextW(status_,
+                 (error ? L"⚠  " + message : L"●  " + message).c_str());
 }
 
 LRESULT CALLBACK App::WindowProcedure(HWND window, UINT message, WPARAM wParam,
@@ -2203,9 +2369,9 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
   case WM_GETMINMAXINFO: {
     auto *limits = reinterpret_cast<MINMAXINFO *>(lParam);
     limits->ptMinTrackSize.x =
-        MulDiv(760, static_cast<int>(dpi_), USER_DEFAULT_SCREEN_DPI);
+        MulDiv(640, static_cast<int>(dpi_), USER_DEFAULT_SCREEN_DPI);
     limits->ptMinTrackSize.y =
-        MulDiv(480, static_cast<int>(dpi_), USER_DEFAULT_SCREEN_DPI);
+        MulDiv(360, static_cast<int>(dpi_), USER_DEFAULT_SCREEN_DPI);
     return 0;
   }
   case WM_DPICHANGED: {
@@ -2223,15 +2389,172 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
   case WM_SIZE:
     LayoutControls(LOWORD(lParam), HIWORD(lParam));
     return 0;
+  case WM_ERASEBKGND: {
+    RECT client{};
+    GetClientRect(window_, &client);
+    FillRect(reinterpret_cast<HDC>(wParam), &client, backgroundBrush_);
+    return TRUE;
+  }
+  case WM_PAINT: {
+    PAINTSTRUCT paint{};
+    HDC dc = BeginPaint(window_, &paint);
+    RECT client{};
+    GetClientRect(window_, &client);
+    FillRect(dc, &client, backgroundBrush_);
+
+    const int radius =
+        MulDiv(12, static_cast<int>(dpi_), USER_DEFAULT_SCREEN_DPI);
+    if (IsRectVisible(sidebarCardRect_)) {
+      DrawRoundedSurface(dc, sidebarCardRect_, kSidebarColor, kBorderColor,
+                         radius);
+    }
+    for (int index = 0; index < 2; ++index) {
+      if (!IsRectVisible(paneCardRects_[index]))
+        continue;
+      DrawRoundedSurface(
+          dc, paneCardRects_[index],
+          index == activePane_ ? kActivePaneColor : kSurfaceColor,
+          index == activePane_ ? kAccentColor : kBorderColor, radius);
+    }
+
+    HPEN separator = CreatePen(PS_SOLID, 1, kBorderColor);
+    const HGDIOBJ oldPen = SelectObject(dc, separator);
+    const int toolbarBottom =
+        MulDiv(kToolbarHeight - 1, static_cast<int>(dpi_),
+               USER_DEFAULT_SCREEN_DPI);
+    MoveToEx(dc, 0, toolbarBottom, nullptr);
+    LineTo(dc, client.right, toolbarBottom);
+    SelectObject(dc, oldPen);
+    DeleteObject(separator);
+    EndPaint(window_, &paint);
+    return 0;
+  }
+  case WM_DRAWITEM: {
+    auto *item = reinterpret_cast<DRAWITEMSTRUCT *>(lParam);
+    if (item->CtlType == ODT_BUTTON) {
+      const bool primary = item->hwndItem == toolbar_[6];
+      const bool pressed = (item->itemState & ODS_SELECTED) != 0;
+      const bool disabled = (item->itemState & ODS_DISABLED) != 0;
+      const bool hot = (item->itemState & ODS_HOTLIGHT) != 0;
+      FillRect(item->hDC, &item->rcItem, backgroundBrush_);
+
+      RECT button = item->rcItem;
+      InflateRect(&button, -1, -1);
+      COLORREF fill = kSurfaceColor;
+      COLORREF border = kBorderColor;
+      COLORREF text = disabled ? kMutedTextColor : kTextColor;
+      if (primary) {
+        fill = pressed ? kAccentPressedColor : kAccentColor;
+        border = fill;
+        text = RGB(255, 255, 255);
+      } else if (pressed || hot) {
+        fill = pressed ? kAccentSoftColor : RGB(239, 246, 255);
+        border = RGB(147, 197, 253);
+      }
+      const int radius =
+          MulDiv(9, static_cast<int>(dpi_), USER_DEFAULT_SCREEN_DPI);
+      DrawRoundedSurface(item->hDC, button, fill, border, radius);
+
+      wchar_t label[64]{};
+      GetWindowTextW(item->hwndItem, label, static_cast<int>(std::size(label)));
+      SetBkMode(item->hDC, TRANSPARENT);
+      SetTextColor(item->hDC, text);
+      RECT textRect = item->rcItem;
+      if (pressed)
+        OffsetRect(&textRect, 0, 1);
+      DrawTextW(item->hDC, label, -1, &textRect,
+                DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+      if ((item->itemState & ODS_FOCUS) != 0) {
+        RECT focus = button;
+        InflateRect(&focus, -3, -3);
+        DrawFocusRect(item->hDC, &focus);
+      }
+      return TRUE;
+    }
+    if (item->CtlID == IdSidebar && item->CtlType == ODT_LISTBOX) {
+      FillRect(item->hDC, &item->rcItem, sidebarBrush_);
+      if (item->itemID == static_cast<UINT>(-1))
+        return TRUE;
+
+      RECT row = item->rcItem;
+      const int horizontalInset =
+          MulDiv(4, static_cast<int>(dpi_), USER_DEFAULT_SCREEN_DPI);
+      InflateRect(&row, -horizontalInset, -2);
+      const bool selected = (item->itemState & ODS_SELECTED) != 0;
+      if (selected) {
+        const int radius =
+            MulDiv(8, static_cast<int>(dpi_), USER_DEFAULT_SCREEN_DPI);
+        DrawRoundedSurface(item->hDC, row, kAccentSoftColor,
+                           kAccentSoftColor, radius);
+      }
+
+      const LRESULT textLength =
+          SendMessageW(sidebar_, LB_GETTEXTLEN, item->itemID, 0);
+      std::wstring text(
+          textLength > 0 ? static_cast<std::size_t>(textLength + 1) : 1U,
+          L'\0');
+      SendMessageW(sidebar_, LB_GETTEXT, item->itemID,
+                   reinterpret_cast<LPARAM>(text.data()));
+      if (textLength > 0)
+        text.resize(static_cast<std::size_t>(textLength));
+      else
+        text.clear();
+
+      SetBkMode(item->hDC, TRANSPARENT);
+      SetTextColor(item->hDC, selected ? RGB(30, 64, 175) : kTextColor);
+      RECT textRect = row;
+      textRect.left +=
+          MulDiv(10, static_cast<int>(dpi_), USER_DEFAULT_SCREEN_DPI);
+      DrawTextW(item->hDC, text.c_str(), static_cast<int>(text.size()),
+                &textRect,
+                DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+      if ((item->itemState & ODS_FOCUS) != 0)
+        DrawFocusRect(item->hDC, &row);
+      return TRUE;
+    }
+    if (activeShellMenu2_ != nullptr &&
+        SUCCEEDED(
+            activeShellMenu2_->HandleMenuMsg(message, wParam, lParam))) {
+      return 0;
+    }
+    break;
+  }
   case WM_CTLCOLOREDIT: {
     const HWND control = reinterpret_cast<HWND>(lParam);
+    HDC dc = reinterpret_cast<HDC>(wParam);
+    SetTextColor(dc, kTextColor);
+    if (control == searchEdit_) {
+      SetBkColor(dc, kSurfaceColor);
+      return reinterpret_cast<LRESULT>(surfaceBrush_);
+    }
     const int paneIndex = PaneIndexFromControl(control);
     if (control == panes_[paneIndex].address) {
       const bool active = paneIndex == activePane_;
-      SetBkColor(reinterpret_cast<HDC>(wParam),
-                 active ? RGB(238, 246, 255) : GetSysColor(COLOR_WINDOW));
+      SetBkColor(dc, active ? kActivePaneColor : kSurfaceColor);
       return reinterpret_cast<LRESULT>(
-          active ? activePaneBrush_ : GetSysColorBrush(COLOR_WINDOW));
+          active ? activePaneBrush_ : surfaceBrush_);
+    }
+    break;
+  }
+  case WM_CTLCOLORLISTBOX: {
+    const HWND control = reinterpret_cast<HWND>(lParam);
+    HDC dc = reinterpret_cast<HDC>(wParam);
+    SetTextColor(dc, kTextColor);
+    SetBkColor(dc, control == sidebar_ ? kSidebarColor : kSurfaceColor);
+    return reinterpret_cast<LRESULT>(control == sidebar_ ? sidebarBrush_
+                                                         : surfaceBrush_);
+  }
+  case WM_CTLCOLORSTATIC: {
+    const HWND control = reinterpret_cast<HWND>(lParam);
+    HDC dc = reinterpret_cast<HDC>(wParam);
+    SetBkMode(dc, TRANSPARENT);
+    if (control == status_) {
+      SetTextColor(dc, kMutedTextColor);
+      return reinterpret_cast<LRESULT>(backgroundBrush_);
+    }
+    if (control == sidebarTitle_) {
+      SetTextColor(dc, kTextColor);
+      return reinterpret_cast<LRESULT>(sidebarBrush_);
     }
     break;
   }
@@ -2240,11 +2563,8 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
       const int splitterWidth =
           MulDiv(kSplitterWidth, static_cast<int>(dpi_),
                  USER_DEFAULT_SCREEN_DPI);
-      RECT left{};
-      GetWindowRect(panes_[0].list, &left);
-      POINT split{left.right + splitterWidth / 2, GET_Y_LPARAM(lParam)};
-      ScreenToClient(window_, &split);
-      if (abs(GET_X_LPARAM(lParam) - split.x) <= splitterWidth) {
+      const int split = paneCardRects_[0].right + splitterWidth / 2;
+      if (abs(GET_X_LPARAM(lParam) - split) <= splitterWidth) {
         draggingSplitter_ = true;
         SetCapture(window_);
       }
@@ -2255,23 +2575,18 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
     if (draggingSplitter_) {
       RECT client{};
       GetClientRect(window_, &client);
-      const int sidebarBase =
-          MulDiv(kSidebarWidth, static_cast<int>(dpi_),
-                 USER_DEFAULT_SCREEN_DPI);
       const int splitterWidth =
           MulDiv(kSplitterWidth, static_cast<int>(dpi_),
                  USER_DEFAULT_SCREEN_DPI);
-      const int margins =
-          MulDiv(8, static_cast<int>(dpi_), USER_DEFAULT_SCREEN_DPI);
-      const int sidebarWidth =
-          sidebarVisible_
-              ? std::min(sidebarBase, static_cast<int>(client.right / 3))
-              : 0;
+      const int gap =
+          MulDiv(10, static_cast<int>(dpi_), USER_DEFAULT_SCREEN_DPI);
+      const int paneLeft =
+          sidebarVisible_ ? sidebarCardRect_.right + gap : gap;
       const int available =
-          client.right - sidebarWidth - splitterWidth - margins;
+          client.right - paneLeft - splitterWidth - gap;
       if (available > 0) {
         splitRatio_ = std::clamp(
-            static_cast<double>(GET_X_LPARAM(lParam) - sidebarWidth) /
+            static_cast<double>(GET_X_LPARAM(lParam) - paneLeft) /
                 available,
             0.2, 0.8);
         LayoutControls(client.right, client.bottom);
@@ -2292,11 +2607,8 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
       POINT point{};
       GetCursorPos(&point);
       ScreenToClient(window_, &point);
-      RECT left{};
-      GetWindowRect(panes_[0].list, &left);
-      POINT split{left.right, 0};
-      ScreenToClient(window_, &split);
-      if (abs(point.x - split.x) <= splitterWidth) {
+      const int split = paneCardRects_[0].right + splitterWidth / 2;
+      if (abs(point.x - split) <= splitterWidth) {
         SetCursor(LoadCursorW(nullptr, IDC_SIZEWE));
         return TRUE;
       }
@@ -2766,7 +3078,6 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
     return 0;
   case WM_INITMENUPOPUP:
   case WM_UNINITMENUPOPUP:
-  case WM_DRAWITEM:
   case WM_MEASUREITEM:
     // activeShellMenu2_ is only non-null while a shell TrackPopupMenu call is
     // modal, so no other popup menu can be active at the same time.

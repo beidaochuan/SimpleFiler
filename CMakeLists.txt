@@ -94,7 +94,7 @@ if(WIN32)
     target_link_libraries(SimpleFiler PRIVATE
         simplefiler_core
         MINIZIP::minizip
-        comctl32 shell32 shlwapi ole32 oleaut32 uuid propsys advapi32
+        comctl32 shell32 shlwapi ole32 oleaut32 uuid propsys advapi32 uxtheme
     )
 endif()
 
