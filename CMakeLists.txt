@@ -70,6 +70,7 @@ if(WIN32)
 
     add_executable(SimpleFiler WIN32
         src/win/App.cpp
+        src/win/CommandController.cpp
         src/win/FileEnumerator.cpp
         src/win/SidebarController.cpp
         src/win/ShellOperations.cpp

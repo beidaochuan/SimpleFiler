@@ -313,12 +313,17 @@ Windows x64 Releaseビルドと全CTest（UIスモークを含む6件）の通�
 
 ---
 
-## Phase 3: CommandController の切り出し（次回実装対象・詳細計画）
+## Phase 3: CommandController の切り出し（実装済み）
 
 Phase 2完了後の`App.cpp`を再調査した。候補リストとプレフィックス入力の状態は
 自己完結している一方、候補確定後のフォルダー移動・アプリ起動・端末起動、
 新規登録では他コントローラーを横断する。`CommandController`自身が他コントローラーを
 所有せず、操作結果をコールバックで`App`へ返す境界とする。
+
+実装日: 2026-07-30。候補・プレフィックス状態、候補構築と確定、登録アプリ起動を
+`CommandController`へ移し、`SidebarController`と`TerminalController`への接続を
+`App`のコールバックへ整理した。Windows x64 Releaseビルドと全CTest
+（候補移動・破棄を追加したUIスモークを含む6件）の通過を確認済み。
 
 ### 対象と所有状態
 
@@ -375,15 +380,73 @@ Phase 2完了後の`App.cpp`を再調査した。候補リストとプレフィ�
 
 ---
 
-## Phase 4以降（概要・未詳細化）
+## Phase 4: ShellMenuController の切り出し（次回実装対象・詳細計画）
 
-### Phase 4: シェルメニュー
+Phase 3完了後の実装を再調査した。シェル拡張が生成するメニューは表示中だけ
+`IContextMenu2`/`IContextMenu3`へWindowsメッセージを転送する必要があり、
+背景メニューは「新規作成」などの動的状態を維持するためフォルダー単位で
+`IContextMenu`をキャッシュしている。このCOM状態と転送処理を同じコントローラーへ
+まとめる。
+
+### 対象と所有状態
 
 - 対象: `ShowFileMenu`, `ShowItemShellMenu`, `ShowBackgroundShellMenu`,
   `AppendFallbackBackgroundMenu`, `ShowLinkMenu`
-- 主な依存: `activeShellMenu2_`/`activeShellMenu3_`(メッセージループの`WM_DRAWITEM`等
-  から直接参照される点の解消が必要)
-- 難易度: 高い(メッセージループとの双方向結合)。
+- `activeShellMenu2_`、`activeShellMenu3_`、
+  `cachedBackgroundMenuFolder_`、`cachedBackgroundMenu_`を移す。
+- `ShellMenuController`のデストラクタで背景メニューのキャッシュを解放する。
+- `ComPtr`、`PidlDeleter`、`UniquePidl`はシェルメニュー専用になっているため、
+  `ShellMenuController.cpp`の匿名namespaceへ移す。
+
+### メッセージループとの接続
+
+- `HandleMenuMessage(UINT, WPARAM, LPARAM, LRESULT&)`を公開する。
+- `WM_INITMENUPOPUP`、`WM_UNINITMENUPOPUP`、`WM_MEASUREITEM`、
+  シェル側の`WM_DRAWITEM`を`IContextMenu2::HandleMenuMsg`へ転送する。
+- `WM_MENUCHAR`は`IContextMenu3::HandleMenuMsg2`の戻り値を`LRESULT&`で返す。
+- `App`は自前コントロールの`WM_DRAWITEM`処理後にこのメソッドへ委譲する。
+- `TrackPopupMenu`中だけactiveポインターを設定するスコープガードは
+  コントローラー内部へ移し、早期returnでも必ず解除する。
+
+### 依存方向
+
+- 実コマンドIDは共有enumへ移さず、`ShellMenuIds`として呼び出し時に渡す。
+  シェルコマンド範囲、組み込みファイル操作、リンク追加、登録アプリ基点を含める。
+- 選択パス、背景フォルダー、ドライブ表示状態、`AppSettings`は引数で受け取る。
+- シェルコマンド後の更新は`RefreshPaneFn`、`open`/`rename`の標準動詞は
+  `OpenSelectedFn`/`BeginRenameFn`へ委譲する。
+- フォールバックメニューの組み込みコマンドは現行どおり`WM_COMMAND`へ戻す。
+- 登録アプリの選択は`LaunchApplicationFn`へ委譲し、`App`から
+  `CommandController::LaunchRegisteredApplication`へ接続する。
+- `ShellMenuController`は`Pane`、`CommandController`、`App`を直接参照しない。
+
+### 呼び出し元の変更
+
+- ファイル一覧の右クリックとAppsキーから、選択パス・実効フォルダー・状態を渡して
+  `ShowFileMenu`を直接呼ぶ。
+- ツールバーのリンクメニューを`ShowLinkMenu`へ委譲する。
+- `App`のデストラクタから背景メニュー解放処理を削除する。
+- メッセージループのシェルメニュー転送分岐を`HandleMenuMessage`へ置き換える。
+
+### 新規・変更ファイル
+
+- `src/win/ShellMenuController.h` / `.cpp`を追加する。
+- `App.h`から対象メソッドとCOM状態を削除し、コントローラーメンバーを追加する。
+- `App.cpp`からシェルメニュー実装・専用COMヘルパーを移し、直接委譲へ変更する。
+- `CMakeLists.txt`へ`src/win/ShellMenuController.cpp`を追加する。
+
+### 検証
+
+1. 単一・複数選択の標準シェルメニュー、open、rename、拡張動詞。
+2. 背景メニューの貼り付け・新規作成と、取得失敗時のフォールバック。
+3. クロスフォルダー検索結果でのフォールバックメニュー。
+4. 登録アプリサブメニューとリンク追加メニュー。
+5. owner-draw/cascading shell extensionのメッセージ転送。
+6. Windows x64 Releaseビルドと全CTest（UIスモークを含む）。
+
+---
+
+## Phase 5以降（概要・未詳細化）
 
 ### Phase 5: ナビゲーション・ファイル操作（最終）
 

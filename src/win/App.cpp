@@ -17,13 +17,11 @@
 #include <array>
 #include <chrono>
 #include <cstddef>
-#include <cwctype>
 #include <filesystem>
 #include <format>
 #include <fstream>
 #include <memory>
 #include <numeric>
-#include <tuple>
 #include <unordered_set>
 #include <vector>
 
@@ -1239,6 +1237,21 @@ std::wstring App::ActivePaneEffectivePath() const {
   return pane.searchMode ? pane.searchRoot : pane.path;
 }
 
+AppArgumentContext
+App::BuildAppArgumentContext(bool includeSelection) const {
+  const auto paneFolder = [](const Pane &pane) {
+    return pane.searchMode ? pane.searchRoot : pane.path;
+  };
+  AppArgumentContext context;
+  if (includeSelection)
+    context.files = SelectedPaths();
+  context.folder = paneFolder(panes_[activePane_]);
+  context.left = paneFolder(panes_[0]);
+  context.right = paneFolder(panes_[1]);
+  context.other = paneFolder(panes_[1 - activePane_]);
+  return context;
+}
+
 void App::OpenSelected() {
   Pane &pane = panes_[activePane_];
   const int index = ListView_GetNextItem(pane.list, -1, LVNI_SELECTED);
@@ -1327,312 +1340,6 @@ void App::ShowSelectedProperties() {
   const auto paths = SelectedPaths();
   if (!paths.empty())
     ShowProperties(window_, paths.front());
-}
-
-void App::RebuildCommandSuggestions() {
-  const CommandQuery command =
-      ParseCommandQuery(GetWindowTextString(searchEdit_));
-  SendMessageW(commandSuggestions_, LB_RESETCONTENT, 0, 0);
-  commandSuggestionItems_.clear();
-  if (command.mode == CommandMode::None) {
-    ShowWindow(commandSuggestions_, SW_HIDE);
-    return;
-  }
-
-  const auto bestScore = [&command](std::initializer_list<std::wstring> values)
-      -> std::optional<int> {
-    std::optional<int> best;
-    for (const std::wstring &value : values) {
-      const std::optional<int> score = CommandMatchScore(command.query, value);
-      if (score && (!best || *score > *best))
-        best = score;
-    }
-    return best;
-  };
-
-  if (command.mode == CommandMode::Folder) {
-    for (std::size_t index = 0; index < settings_.bookmarks.size(); ++index) {
-      const Bookmark &bookmark = settings_.bookmarks[index];
-      const std::wstring name = Utf8ToWide(bookmark.name);
-      const std::wstring path = Utf8ToWide(bookmark.path);
-      const std::wstring alias = Utf8ToWide(bookmark.alias);
-      std::optional<int> score = bestScore({name, path, alias});
-      for (const std::string &keyword : bookmark.keywords) {
-        const std::optional<int> keywordScore =
-            CommandMatchScore(command.query, Utf8ToWide(keyword));
-        if (keywordScore && (!score || *keywordScore > *score))
-          score = keywordScore;
-      }
-      if (score) {
-        const std::wstring label =
-            alias.empty() ? name : name + L" [" + alias + L"]";
-        commandSuggestionItems_.push_back(
-            {CommandSuggestionKind::Folder, index, false, *score, label,
-             path});
-      }
-    }
-  } else if (command.mode == CommandMode::Application) {
-    for (std::size_t index = 0; index < settings_.links.size(); ++index) {
-      const RegisteredLink &link = settings_.links[index];
-      if (link.type != LinkType::Application)
-        continue;
-      const std::wstring name = Utf8ToWide(link.name);
-      const std::wstring target =
-          ResolveAppPath(Utf8ToWide(link.target));
-      const std::wstring alias = Utf8ToWide(link.alias);
-      std::optional<int> score = bestScore({name, target, alias});
-      for (const std::string &keyword : link.keywords) {
-        const std::optional<int> keywordScore =
-            CommandMatchScore(command.query, Utf8ToWide(keyword));
-        if (keywordScore && (!score || *keywordScore > *score))
-          score = keywordScore;
-      }
-      if (score) {
-        const std::wstring label =
-            alias.empty() ? name : name + L" [" + alias + L"]";
-        commandSuggestionItems_.push_back({CommandSuggestionKind::Application,
-                                           index, false, *score, label,
-                                           target});
-      }
-    }
-  } else if (command.mode == CommandMode::Terminal) {
-    const Pane &pane = panes_[activePane_];
-    const std::wstring directory =
-        pane.searchMode ? pane.searchRoot : pane.path;
-    for (const auto &[administrator, terms, label] :
-         std::array<std::tuple<bool, std::wstring, std::wstring>, 2>{
-             {{false, L"通常 normal", L"CMDをここで開く"},
-              {true, L"admin 管理者", L"管理者CMDをここで開く"}}}) {
-      const std::optional<int> score = bestScore({terms, label});
-      if (score) {
-        commandSuggestionItems_.push_back(
-            {CommandSuggestionKind::Terminal, 0, administrator, *score, label,
-             directory});
-      }
-    }
-  }
-
-  std::stable_sort(commandSuggestionItems_.begin(),
-                   commandSuggestionItems_.end(),
-                   [](const CommandSuggestion &left,
-                      const CommandSuggestion &right) {
-                     if (left.score != right.score)
-                       return left.score > right.score;
-                     return left.label < right.label;
-                   });
-  for (const CommandSuggestion &suggestion : commandSuggestionItems_) {
-    const std::wstring text = suggestion.detail.empty()
-                                  ? suggestion.label
-                                  : suggestion.label + L"    " +
-                                        suggestion.detail;
-    SendMessageW(commandSuggestions_, LB_ADDSTRING, 0,
-                 reinterpret_cast<LPARAM>(text.c_str()));
-  }
-  if (commandSuggestionItems_.empty()) {
-    ShowWindow(commandSuggestions_, SW_HIDE);
-    Notify(L"一致する候補がありません");
-    return;
-  }
-  SendMessageW(commandSuggestions_, LB_SETCURSEL, 0, 0);
-  SetWindowPos(commandSuggestions_, HWND_TOP, 0, 0, 0, 0,
-               SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
-}
-
-void App::MoveCommandSelection(int delta) {
-  if (!IsWindowVisible(commandSuggestions_) ||
-      commandSuggestionItems_.empty()) {
-    return;
-  }
-  int selected =
-      static_cast<int>(SendMessageW(commandSuggestions_, LB_GETCURSEL, 0, 0));
-  if (selected < 0)
-    selected = 0;
-  selected = std::clamp(selected + delta, 0,
-                        static_cast<int>(commandSuggestionItems_.size()) - 1);
-  SendMessageW(commandSuggestions_, LB_SETCURSEL, selected, 0);
-}
-
-void App::AcceptCommandSuggestion(bool control, bool shift) {
-  if (!IsWindowVisible(commandSuggestions_)) {
-    if (ParseCommandQuery(GetWindowTextString(searchEdit_)).mode !=
-        CommandMode::None) {
-      Notify(L"実行できる候補がありません", true);
-      return;
-    }
-    StartSearch(GetWindowTextString(searchEdit_));
-    return;
-  }
-  const int selected =
-      static_cast<int>(SendMessageW(commandSuggestions_, LB_GETCURSEL, 0, 0));
-  if (selected < 0 ||
-      selected >= static_cast<int>(commandSuggestionItems_.size())) {
-    return;
-  }
-  const CommandSuggestion suggestion = commandSuggestionItems_[selected];
-  DismissCommandSuggestions(true);
-
-  switch (suggestion.kind) {
-  case CommandSuggestionKind::Folder:
-    if (suggestion.sourceIndex < settings_.bookmarks.size()) {
-      const int pane = shift && twoPanes_ ? 1 - activePane_ : activePane_;
-      Navigate(pane,
-               Utf8ToWide(settings_.bookmarks[suggestion.sourceIndex].path));
-      activePane_ = pane;
-      UpdateActivePaneVisuals();
-      SetFocus(panes_[activePane_].list);
-    }
-    break;
-  case CommandSuggestionKind::Application:
-    LaunchRegisteredApplication(suggestion.sourceIndex, control, !shift);
-    break;
-  case CommandSuggestionKind::Terminal:
-    terminalController_.LaunchSelectedTerminal(
-        window_, ActivePaneEffectivePath(),
-        TerminalKind::CommandPrompt, suggestion.administrator,
-        [this](const std::wstring &message, bool error) {
-          Notify(message, error);
-        });
-    break;
-  }
-}
-
-void App::DismissCommandSuggestions(bool clearInput) {
-  ShowWindow(commandSuggestions_, SW_HIDE);
-  commandSuggestionItems_.clear();
-  if (clearInput)
-    SetWindowTextW(searchEdit_, L"");
-  SetFocus(panes_[activePane_].list);
-}
-
-bool App::HandleCommandPrefixCharacter(wchar_t character, HWND source) {
-  constexpr ULONGLONG kPrefixTimeoutMilliseconds = 1500;
-  character = static_cast<wchar_t>(
-      std::towlower(static_cast<wint_t>(character)));
-  const ULONGLONG now = GetTickCount64();
-  if (source != commandPrefixSource_ ||
-      now - commandPrefixTick_ > kPrefixTimeoutMilliseconds) {
-    commandPrefixBuffer_.clear();
-  }
-  commandPrefixSource_ = source;
-  commandPrefixTick_ = now;
-
-  std::wstring completedPrefix;
-  if ((character == L'f' || character == L'a') &&
-      commandPrefixBuffer_.size() == 1 &&
-      commandPrefixBuffer_.front() == character) {
-    completedPrefix.assign(2, character);
-  } else if (character == L'd' && commandPrefixBuffer_ == L"cm") {
-    completedPrefix = L"cmd";
-  }
-
-  if (!completedPrefix.empty()) {
-    commandPrefixBuffer_.clear();
-    SetWindowTextW(searchEdit_, completedPrefix.c_str());
-    SetFocus(searchEdit_);
-    SendMessageW(searchEdit_, EM_SETSEL,
-                 static_cast<WPARAM>(completedPrefix.size()),
-                 static_cast<LPARAM>(completedPrefix.size()));
-    return true;
-  }
-
-  if (character == L'f' || character == L'a' || character == L'c') {
-    commandPrefixBuffer_.assign(1, character);
-  } else if (character == L'm' && commandPrefixBuffer_ == L"c") {
-    commandPrefixBuffer_ = L"cm";
-  } else {
-    commandPrefixBuffer_.clear();
-  }
-  return false;
-}
-
-void App::AddCommandRegistration() {
-  const CommandMode mode =
-      ParseCommandQuery(GetWindowTextString(searchEdit_)).mode;
-  ShowWindow(commandSuggestions_, SW_HIDE);
-  if (mode == CommandMode::Folder) {
-    sidebarController_.AddBookmarkForPath(
-        sidebar_, settings_, ActivePaneEffectivePath(),
-        [this](const std::wstring &title, const std::wstring &label,
-               const std::wstring &initial) {
-          return PromptText(title, label, initial);
-        },
-        [this] { SaveSettings(); });
-  } else if (mode == CommandMode::Application) {
-    sidebarController_.AddLink(
-        window_, sidebar_, settings_, true,
-        [this](const std::wstring &title, const std::wstring &label,
-               const std::wstring &initial) {
-          return PromptText(title, label, initial);
-        },
-        [this] { SaveSettings(); });
-  } else {
-    Notify(L"ffまたはaaを入力してから登録してください", true);
-    return;
-  }
-  SetFocus(searchEdit_);
-  RebuildCommandSuggestions();
-}
-
-void App::LaunchRegisteredApplication(std::size_t index, bool administrator,
-                                      bool passSelection) {
-  if (index >= settings_.links.size() ||
-      settings_.links[index].type != LinkType::Application) {
-    return;
-  }
-  const RegisteredLink &link = settings_.links[index];
-  const std::wstring target = ResolveAppPath(Utf8ToWide(link.target));
-  if (GetFileAttributesW(ToExtendedPath(target).c_str()) ==
-      INVALID_FILE_ATTRIBUTES) {
-    Notify(L"登録アプリが見つかりません: " + target, true);
-    return;
-  }
-
-  const Pane &pane = panes_[activePane_];
-  const auto paneFolder = [](const Pane &value) {
-    return value.searchMode ? value.searchRoot : value.path;
-  };
-  AppArgumentContext context;
-  if (passSelection)
-    context.files = SelectedPaths();
-  context.folder = paneFolder(pane);
-  context.left = paneFolder(panes_[0]);
-  context.right = paneFolder(panes_[1]);
-  context.other = paneFolder(panes_[1 - activePane_]);
-
-  std::wstring arguments;
-  const std::wstring argumentTemplate = Utf8ToWide(link.arguments);
-  if (!argumentTemplate.empty()) {
-    const AppArgumentExpansion expansion =
-        ExpandAppArgumentTemplate(argumentTemplate, context);
-    if (!expansion) {
-      Notify(L"アプリ引数を作成できません: " + expansion.error, true);
-      return;
-    }
-    arguments = expansion.commandLine;
-  } else if (passSelection) {
-    if (context.files.empty()) {
-      arguments = QuoteWindowsCommandLineArgument(context.folder);
-    } else {
-      for (const std::wstring &path : context.files) {
-        if (!arguments.empty())
-          arguments.push_back(L' ');
-        arguments += QuoteWindowsCommandLineArgument(path);
-      }
-    }
-  }
-
-  std::wstring workingDirectory =
-      ResolveAppPath(Utf8ToWide(link.workingDirectory));
-  if (workingDirectory.empty())
-    workingDirectory = context.folder;
-  if (!OpenPath(window_, target, arguments, workingDirectory,
-                administrator || link.runAsAdministrator)) {
-    const DWORD error = GetLastError();
-    if (error != ERROR_CANCELLED) {
-      Notify(L"登録アプリを起動できません: " + WindowsErrorMessage(error),
-             true);
-    }
-  }
 }
 
 void App::ShowLinkMenu(HWND sourceButton) {
@@ -1962,8 +1669,12 @@ void App::ShowFileMenu(POINT point) {
   DestroyMenu(menu);
   if (selectedCommand >= IdRegisteredAppBase &&
       selectedCommand - IdRegisteredAppBase < settings_.links.size()) {
-    LaunchRegisteredApplication(selectedCommand - IdRegisteredAppBase, false,
-                                true);
+    commandController_.LaunchRegisteredApplication(
+        window_, settings_, selectedCommand - IdRegisteredAppBase, false, true,
+        BuildAppArgumentContext(true),
+        [this](const std::wstring &message, bool error) {
+          Notify(message, error);
+        });
   } else if (selectedCommand != 0) {
     SendMessageW(window_, WM_COMMAND, selectedCommand, 0);
   }
@@ -2053,6 +1764,41 @@ LRESULT CALLBACK App::WindowProcedure(HWND window, UINT message, WPARAM wParam,
 }
 
 LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
+  const auto launchRegisteredApplication =
+      [this](std::size_t index, bool administrator, bool passSelection) {
+        commandController_.LaunchRegisteredApplication(
+            window_, settings_, index, administrator, passSelection,
+            BuildAppArgumentContext(passSelection),
+            [this](const std::wstring &message, bool error) {
+              Notify(message, error);
+            });
+      };
+  const auto acceptCommandSuggestion = [this](bool control, bool shift) {
+    commandController_.AcceptCommandSuggestion(
+        window_, searchEdit_, commandSuggestions_, panes_[activePane_].list,
+        settings_, BuildAppArgumentContext(!shift), control, shift,
+        [this](const std::wstring &query) { StartSearch(query); },
+        [this](const std::wstring &path, bool otherPane) {
+          const int pane =
+              otherPane && twoPanes_ ? 1 - activePane_ : activePane_;
+          Navigate(pane, path);
+          activePane_ = pane;
+          UpdateActivePaneVisuals();
+          SetFocus(panes_[activePane_].list);
+        },
+        [this](bool administrator) {
+          terminalController_.LaunchSelectedTerminal(
+              window_, ActivePaneEffectivePath(),
+              TerminalKind::CommandPrompt, administrator,
+              [this](const std::wstring &message, bool error) {
+                Notify(message, error);
+              });
+        },
+        [this](const std::wstring &message, bool error) {
+          Notify(message, error);
+        });
+  };
+
   switch (message) {
   case WM_SYSCOMMAND:
     if ((wParam & 0xFFF0) == IdShowAbout) {
@@ -2324,8 +2070,9 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
       sidebarController_.ActivateSidebarItem(
           window_, sidebar_, settings_, false,
           [this](const std::wstring &path) { Navigate(activePane_, path); },
-          [this](std::size_t index, bool administrator) {
-            LaunchRegisteredApplication(index, administrator, true);
+          [&launchRegisteredApplication](std::size_t index,
+                                         bool administrator) {
+            launchRegisteredApplication(index, administrator, true);
           },
           [this](const std::wstring &message, bool error) {
             Notify(message, error);
@@ -2334,17 +2081,21 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
     }
     if (HIWORD(wParam) == LBN_DBLCLK &&
         command == IdCommandSuggestions) {
-      AcceptCommandSuggestion(false, false);
+      acceptCommandSuggestion(false, false);
       return 0;
     }
     if (HIWORD(wParam) == EN_CHANGE && command == IdSearchEdit) {
-      RebuildCommandSuggestions();
+      commandController_.RebuildCommandSuggestions(
+          searchEdit_, commandSuggestions_, settings_,
+          ActivePaneEffectivePath(),
+          [this](const std::wstring &message, bool error) {
+            Notify(message, error);
+          });
       return 0;
     }
     if (HIWORD(wParam) == EN_SETFOCUS &&
         (command == IdLeftAddress || command == IdRightAddress)) {
-      ShowWindow(commandSuggestions_, SW_HIDE);
-      commandSuggestionItems_.clear();
+      commandController_.HideCommandSuggestions(commandSuggestions_);
       activePane_ = command == IdLeftAddress ? 0 : 1;
       UpdateActivePaneVisuals();
     }
@@ -2458,9 +2209,8 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
           });
       break;
     case IdSearch:
-      if (ParseCommandQuery(GetWindowTextString(searchEdit_)).mode !=
-          CommandMode::None) {
-        AcceptCommandSuggestion(
+      if (commandController_.HasCommandInput(searchEdit_)) {
+        acceptCommandSuggestion(
             (GetKeyState(VK_CONTROL) & 0x8000) != 0,
             (GetKeyState(VK_SHIFT) & 0x8000) != 0);
       } else if (panes_[activePane_].searchMode &&
@@ -2565,8 +2315,9 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
       sidebarController_.ActivateSidebarItem(
           window_, sidebar_, settings_, false,
           [this](const std::wstring &path) { Navigate(activePane_, path); },
-          [this](std::size_t index, bool administrator) {
-            LaunchRegisteredApplication(index, administrator, true);
+          [&launchRegisteredApplication](std::size_t index,
+                                         bool administrator) {
+            launchRegisteredApplication(index, administrator, true);
           },
           [this](const std::wstring &message, bool error) {
             Notify(message, error);
@@ -2576,8 +2327,9 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
       sidebarController_.ActivateSidebarItem(
           window_, sidebar_, settings_, true,
           [this](const std::wstring &path) { Navigate(activePane_, path); },
-          [this](std::size_t index, bool administrator) {
-            LaunchRegisteredApplication(index, administrator, true);
+          [&launchRegisteredApplication](std::size_t index,
+                                         bool administrator) {
+            launchRegisteredApplication(index, administrator, true);
           },
           [this](const std::wstring &message, bool error) {
             Notify(message, error);
@@ -2717,22 +2469,58 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
     }
     break;
   case kMessageCommandType:
-    return HandleCommandPrefixCharacter(
-               static_cast<wchar_t>(wParam),
+    return commandController_.HandleCommandPrefixCharacter(
+               searchEdit_, static_cast<wchar_t>(wParam),
                reinterpret_cast<HWND>(lParam))
                ? TRUE
                : FALSE;
-  case kMessageCommandAccept:
-    AcceptCommandSuggestion((wParam & 1U) != 0, (wParam & 2U) != 0);
+  case kMessageCommandAccept: {
+    const bool control = (wParam & 1U) != 0;
+    const bool shift = (wParam & 2U) != 0;
+    acceptCommandSuggestion(control, shift);
     return 0;
+  }
   case kMessageCommandMove:
-    MoveCommandSelection(static_cast<int>(static_cast<INT_PTR>(lParam)));
+    commandController_.MoveCommandSelection(
+        commandSuggestions_,
+        static_cast<int>(static_cast<INT_PTR>(lParam)));
     return 0;
   case kMessageCommandDismiss:
-    DismissCommandSuggestions(true);
+    commandController_.DismissCommandSuggestions(
+        searchEdit_, commandSuggestions_, panes_[activePane_].list, true);
     return 0;
   case kMessageCommandNew:
-    AddCommandRegistration();
+    commandController_.AddCommandRegistration(
+        searchEdit_, commandSuggestions_,
+        [this] {
+          sidebarController_.AddBookmarkForPath(
+              sidebar_, settings_, ActivePaneEffectivePath(),
+              [this](const std::wstring &title, const std::wstring &label,
+                     const std::wstring &initial) {
+                return PromptText(title, label, initial);
+              },
+              [this] { SaveSettings(); });
+        },
+        [this] {
+          sidebarController_.AddLink(
+              window_, sidebar_, settings_, true,
+              [this](const std::wstring &title, const std::wstring &label,
+                     const std::wstring &initial) {
+                return PromptText(title, label, initial);
+              },
+              [this] { SaveSettings(); });
+        },
+        [this](const std::wstring &message, bool error) {
+          Notify(message, error);
+        },
+        [this] {
+          commandController_.RebuildCommandSuggestions(
+              searchEdit_, commandSuggestions_, settings_,
+              ActivePaneEffectivePath(),
+              [this](const std::wstring &message, bool error) {
+                Notify(message, error);
+              });
+        });
     return 0;
   case kMessageSidebarMove:
     if (reinterpret_cast<HWND>(lParam) == sidebar_)

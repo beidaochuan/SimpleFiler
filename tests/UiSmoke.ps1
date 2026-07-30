@@ -564,6 +564,41 @@ try {
     }
 
     [void][SimpleFilerNativeMethods]::SendMessageText(
+        $commandEdit, 0x000C, [IntPtr]::Zero, 'aa')
+    $allAppCount = [SimpleFilerNativeMethods]::SendMessage(
+        $suggestions, 0x018B, [IntPtr]::Zero, [IntPtr]::Zero).ToInt32()
+    if ($allAppCount -lt 2) {
+        throw "aa produced $allAppCount candidates instead of at least two"
+    }
+    [void][SimpleFilerNativeMethods]::PostMessage(
+        $suggestions, 0x0100, [IntPtr]0x28, [IntPtr]::Zero)
+    [void][SimpleFilerNativeMethods]::PostMessage(
+        $suggestions, 0x0101, [IntPtr]0x28, [IntPtr]::Zero)
+    if (!(Wait-Until -Condition {
+            [SimpleFilerNativeMethods]::SendMessage(
+                $suggestions, 0x0188, [IntPtr]::Zero,
+                [IntPtr]::Zero).ToInt32() -eq 1
+        })) {
+        throw 'Down did not move the command candidate selection'
+    }
+    [void][SimpleFilerNativeMethods]::PostMessage(
+        $suggestions, 0x0100, [IntPtr]0x1B, [IntPtr]::Zero)
+    [void][SimpleFilerNativeMethods]::PostMessage(
+        $suggestions, 0x0101, [IntPtr]0x1B, [IntPtr]::Zero)
+    if (!(Wait-Until -Condition {
+            $directInput.Clear() | Out-Null
+            [void][SimpleFilerNativeMethods]::SendMessageGetText(
+                $commandEdit, 0x000D, [IntPtr]$directInput.Capacity,
+                $directInput)
+            $remainingSuggestions = [SimpleFilerNativeMethods]::SendMessage(
+                $suggestions, 0x018B, [IntPtr]::Zero,
+                [IntPtr]::Zero).ToInt32()
+            $directInput.Length -eq 0 -and $remainingSuggestions -eq 0
+        })) {
+        throw 'Esc did not dismiss and clear the command candidates'
+    }
+
+    [void][SimpleFilerNativeMethods]::SendMessageText(
         $commandEdit, 0x000C, [IntPtr]::Zero, 'aanote')
     $appCount = [SimpleFilerNativeMethods]::SendMessage(
         $suggestions, 0x018B, [IntPtr]::Zero, [IntPtr]::Zero).ToInt32()

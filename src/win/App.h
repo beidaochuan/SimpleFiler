@@ -1,7 +1,7 @@
 #pragma once
 
-#include "core/CommandQuery.h"
 #include "core/Settings.h"
+#include "win/CommandController.h"
 #include "win/FileEnumerator.h"
 #include "win/SidebarController.h"
 #include "win/TerminalController.h"
@@ -28,21 +28,6 @@ public:
   int Run(int showCommand, const std::wstring &initialPath);
 
 private:
-  enum class CommandSuggestionKind {
-    Folder,
-    Application,
-    Terminal,
-  };
-
-  struct CommandSuggestion final {
-    CommandSuggestionKind kind = CommandSuggestionKind::Folder;
-    std::size_t sourceIndex = 0;
-    bool administrator = false;
-    int score = 0;
-    std::wstring label;
-    std::wstring detail;
-  };
-
   struct Pane final {
     struct RetiredWorker final {
       std::uint64_t generation = 0;
@@ -110,18 +95,12 @@ private:
                                POINT screenPoint);
   void AppendFallbackBackgroundMenu(POINT screenPoint);
   void ShowLinkMenu(HWND sourceButton);
-  void RebuildCommandSuggestions();
-  void MoveCommandSelection(int delta);
-  void AcceptCommandSuggestion(bool control = false, bool shift = false);
-  void DismissCommandSuggestions(bool clearInput);
-  bool HandleCommandPrefixCharacter(wchar_t character, HWND source);
-  void AddCommandRegistration();
-  void LaunchRegisteredApplication(std::size_t index, bool administrator,
-                                   bool passSelection);
   void ShowAboutDialog();
 
   [[nodiscard]] std::vector<std::wstring> SelectedPaths() const;
   [[nodiscard]] std::wstring ActivePaneEffectivePath() const;
+  [[nodiscard]] AppArgumentContext
+  BuildAppArgumentContext(bool includeSelection) const;
   [[nodiscard]] int PaneIndexFromControl(HWND control) const;
   [[nodiscard]] std::wstring PromptText(const std::wstring &title,
                                         const std::wstring &label,
@@ -153,14 +132,11 @@ private:
   bool draggingSplitter_ = false;
   bool settingsWritable_ = true;
   std::size_t pendingFileOperations_ = 0;
+  CommandController commandController_;
   SidebarController sidebarController_;
   ZipController zipController_;
   TerminalController terminalController_;
   double splitRatio_ = 0.5;
-  std::vector<CommandSuggestion> commandSuggestionItems_;
-  std::wstring commandPrefixBuffer_;
-  HWND commandPrefixSource_ = nullptr;
-  ULONGLONG commandPrefixTick_ = 0;
   AppSettings settings_;
   SettingsStore settingsStore_;
   IContextMenu2 *activeShellMenu2_ = nullptr;
