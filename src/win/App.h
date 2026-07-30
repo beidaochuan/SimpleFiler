@@ -47,7 +47,7 @@ private:
   void RefreshPaneView(int pane);
   void StartPaneSearch(int pane, const std::wstring &query);
   void OpenPaneSelection(int pane);
-  void LaunchRegisteredApplication(std::size_t index, bool administrator,
+  void LaunchRegisteredApplication(const std::string &id, bool administrator,
                                    bool passSelection);
   void AcceptCommandSuggestion(bool control, bool shift);
 

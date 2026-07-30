@@ -7,7 +7,6 @@
 #include <cstddef>
 #include <functional>
 #include <string>
-#include <utility>
 #include <vector>
 
 namespace sf::win {
@@ -30,7 +29,7 @@ public:
   using NotifyFn = std::function<void(const std::wstring &message, bool error)>;
   using NavigateFn = std::function<void(const std::wstring &path)>;
   using LaunchApplicationFn =
-      std::function<void(std::size_t index, bool administrator)>;
+      std::function<void(const std::string &id, bool administrator)>;
 
   SidebarController() = default;
 
@@ -62,7 +61,12 @@ public:
                        const SidebarMenuIds &ids) const;
 
 private:
-  std::vector<std::pair<bool, std::size_t>> sidebarMap_;
+  struct EntryReference final {
+    bool bookmark = false;
+    std::string id;
+  };
+
+  std::vector<EntryReference> sidebarMap_;
 };
 
 } // namespace sf::win

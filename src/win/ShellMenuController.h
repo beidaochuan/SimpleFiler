@@ -35,7 +35,7 @@ public:
   using RefreshPaneFn = std::function<void()>;
   using OpenSelectedFn = std::function<void()>;
   using BeginRenameFn = std::function<void()>;
-  using LaunchApplicationFn = std::function<void(std::size_t index)>;
+  using LaunchApplicationFn = std::function<void(const std::string &id)>;
 
   ShellMenuController() = default;
   ~ShellMenuController();

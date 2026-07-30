@@ -5,9 +5,11 @@
 
 #include <commdlg.h>
 
+#include <algorithm>
 #include <array>
 #include <cwctype>
 #include <filesystem>
+#include <iterator>
 
 namespace sf::win {
 namespace {
@@ -136,17 +138,15 @@ void SidebarController::RebuildSidebar(HWND sidebar,
                                        const AppSettings &settings) {
   SendMessageW(sidebar, LB_RESETCONTENT, 0, 0);
   sidebarMap_.clear();
-  for (std::size_t index = 0; index < settings.bookmarks.size(); ++index) {
-    const Bookmark &bookmark = settings.bookmarks[index];
+  for (const Bookmark &bookmark : settings.bookmarks) {
     const std::wstring path = Utf8ToWide(bookmark.path);
     const std::wstring prefix = IsDirectory(path) ? L"★ " : L"⚠ ";
     SendMessageW(
         sidebar, LB_ADDSTRING, 0,
         reinterpret_cast<LPARAM>((prefix + Utf8ToWide(bookmark.name)).c_str()));
-    sidebarMap_.emplace_back(true, index);
+    sidebarMap_.push_back({true, bookmark.id});
   }
-  for (std::size_t index = 0; index < settings.links.size(); ++index) {
-    const RegisteredLink &link = settings.links[index];
+  for (const RegisteredLink &link : settings.links) {
     const std::wstring target = ResolveAppPath(Utf8ToWide(link.target));
     const std::wstring prefix =
         GetFileAttributesW(ToExtendedPath(target).c_str()) !=
@@ -156,7 +156,7 @@ void SidebarController::RebuildSidebar(HWND sidebar,
     SendMessageW(
         sidebar, LB_ADDSTRING, 0,
         reinterpret_cast<LPARAM>((prefix + Utf8ToWide(link.name)).c_str()));
-    sidebarMap_.emplace_back(false, index);
+    sidebarMap_.push_back({false, link.id});
   }
 }
 
@@ -168,27 +168,36 @@ void SidebarController::ActivateSidebarItem(
       static_cast<int>(SendMessageW(sidebar, LB_GETCURSEL, 0, 0));
   if (selected < 0 || selected >= static_cast<int>(sidebarMap_.size()))
     return;
-  const auto [bookmark, index] = sidebarMap_[selected];
-  if (bookmark) {
-    if (index < settings.bookmarks.size())
-      navigate(Utf8ToWide(settings.bookmarks[index].path));
+  const EntryReference &reference = sidebarMap_[selected];
+  if (reference.bookmark) {
+    const auto bookmark =
+        std::find_if(settings.bookmarks.begin(), settings.bookmarks.end(),
+                     [&reference](const Bookmark &entry) {
+                       return entry.id == reference.id;
+                     });
+    if (bookmark != settings.bookmarks.end())
+      navigate(Utf8ToWide(bookmark->path));
     return;
   }
-  if (index >= settings.links.size())
+  const auto link =
+      std::find_if(settings.links.begin(), settings.links.end(),
+                   [&reference](const RegisteredLink &entry) {
+                     return entry.id == reference.id;
+                   });
+  if (link == settings.links.end())
     return;
-  const RegisteredLink &link = settings.links[index];
-  if (link.type == LinkType::Application) {
-    launchApplication(index, administrator);
+  if (link->type == LinkType::Application) {
+    launchApplication(link->id, administrator);
     return;
   }
-  const std::wstring target = ResolveAppPath(Utf8ToWide(link.target));
+  const std::wstring target = ResolveAppPath(Utf8ToWide(link->target));
   if (GetFileAttributesW(ToExtendedPath(target).c_str()) ==
       INVALID_FILE_ATTRIBUTES) {
     notify(L"登録先が見つかりません: " + target, true);
     return;
   }
-  if (!OpenPath(window, target, Utf8ToWide(link.arguments),
-                ResolveAppPath(Utf8ToWide(link.workingDirectory)))) {
+  if (!OpenPath(window, target, Utf8ToWide(link->arguments),
+                ResolveAppPath(Utf8ToWide(link->workingDirectory)))) {
     const DWORD error = GetLastError();
     if (error != ERROR_CANCELLED)
       notify(L"リンク先を開けません: " + WindowsErrorMessage(error), true);
@@ -203,11 +212,19 @@ void SidebarController::EditSidebarItem(
   if (selected < 0 || selected >= static_cast<int>(sidebarMap_.size()))
     return;
 
-  const auto [bookmarkEntry, index] = sidebarMap_[selected];
-  if (bookmarkEntry) {
-    if (index >= settings.bookmarks.size())
+  const EntryReference reference = sidebarMap_[selected];
+  int restoredSelection = -1;
+  if (reference.bookmark) {
+    const auto found =
+        std::find_if(settings.bookmarks.begin(), settings.bookmarks.end(),
+                     [&reference](const Bookmark &entry) {
+                       return entry.id == reference.id;
+                     });
+    if (found == settings.bookmarks.end())
       return;
-    Bookmark &bookmark = settings.bookmarks[index];
+    restoredSelection = static_cast<int>(
+        std::distance(settings.bookmarks.begin(), found));
+    Bookmark &bookmark = *found;
     const std::wstring name = promptText(
         L"フォルダー登録を編集", L"表示名", Utf8ToWide(bookmark.name));
     if (name.empty())
@@ -228,9 +245,18 @@ void SidebarController::EditSidebarItem(
     bookmark.alias = WideToUtf8(alias);
     bookmark.keywords = SplitKeywords(keywords);
   } else {
-    if (index >= settings.links.size())
+    const auto found =
+        std::find_if(settings.links.begin(), settings.links.end(),
+                     [&reference](const RegisteredLink &entry) {
+                       return entry.id == reference.id;
+                     });
+    if (found == settings.links.end())
       return;
-    RegisteredLink &link = settings.links[index];
+    restoredSelection =
+        static_cast<int>(settings.bookmarks.size() +
+                         static_cast<std::size_t>(
+                             std::distance(settings.links.begin(), found)));
+    RegisteredLink &link = *found;
     const std::wstring name = promptText(
         L"リンク登録を編集", L"表示名", Utf8ToWide(link.name));
     if (name.empty())
@@ -275,7 +301,7 @@ void SidebarController::EditSidebarItem(
   }
   RebuildSidebar(sidebar, settings);
   saveSettings();
-  SendMessageW(sidebar, LB_SETCURSEL, selected, 0);
+  SendMessageW(sidebar, LB_SETCURSEL, restoredSelection, 0);
 }
 
 void SidebarController::RemoveSidebarItem(
@@ -285,15 +311,25 @@ void SidebarController::RemoveSidebarItem(
       static_cast<int>(SendMessageW(sidebar, LB_GETCURSEL, 0, 0));
   if (selected < 0 || selected >= static_cast<int>(sidebarMap_.size()))
     return;
-  const auto [bookmark, index] = sidebarMap_[selected];
-  if (bookmark) {
-    if (index >= settings.bookmarks.size())
+  const EntryReference reference = sidebarMap_[selected];
+  if (reference.bookmark) {
+    const auto found =
+        std::find_if(settings.bookmarks.begin(), settings.bookmarks.end(),
+                     [&reference](const Bookmark &entry) {
+                       return entry.id == reference.id;
+                     });
+    if (found == settings.bookmarks.end())
       return;
-    settings.bookmarks.erase(settings.bookmarks.begin() + index);
+    settings.bookmarks.erase(found);
   } else {
-    if (index >= settings.links.size())
+    const auto found =
+        std::find_if(settings.links.begin(), settings.links.end(),
+                     [&reference](const RegisteredLink &entry) {
+                       return entry.id == reference.id;
+                     });
+    if (found == settings.links.end())
       return;
-    settings.links.erase(settings.links.begin() + index);
+    settings.links.erase(found);
   }
   RebuildSidebar(sidebar, settings);
   saveSettings();
@@ -306,20 +342,34 @@ void SidebarController::MoveSidebarItem(
       static_cast<int>(SendMessageW(sidebar, LB_GETCURSEL, 0, 0));
   if (selected < 0 || selected >= static_cast<int>(sidebarMap_.size()))
     return;
-  const auto [bookmark, index] = sidebarMap_[selected];
+  const EntryReference reference = sidebarMap_[selected];
+  const auto indexForId = [&reference](const auto &entries) {
+    const auto found = std::find_if(
+        entries.begin(), entries.end(),
+        [&reference](const auto &entry) { return entry.id == reference.id; });
+    return found == entries.end()
+               ? entries.size()
+               : static_cast<std::size_t>(std::distance(entries.begin(), found));
+  };
+  const std::size_t index = reference.bookmark
+                                ? indexForId(settings.bookmarks)
+                                : indexForId(settings.links);
   const std::size_t sectionSize =
-      bookmark ? settings.bookmarks.size() : settings.links.size();
+      reference.bookmark ? settings.bookmarks.size() : settings.links.size();
   if (index >= sectionSize || (up ? index == 0 : index + 1 >= sectionSize))
     return;
   const std::size_t otherIndex = up ? index - 1 : index + 1;
-  if (bookmark) {
+  if (reference.bookmark) {
     std::swap(settings.bookmarks[index], settings.bookmarks[otherIndex]);
   } else {
     std::swap(settings.links[index], settings.links[otherIndex]);
   }
   RebuildSidebar(sidebar, settings);
   saveSettings();
-  SendMessageW(sidebar, LB_SETCURSEL, up ? selected - 1 : selected + 1, 0);
+  const std::size_t sidebarIndex =
+      reference.bookmark ? otherIndex
+                         : settings.bookmarks.size() + otherIndex;
+  SendMessageW(sidebar, LB_SETCURSEL, sidebarIndex, 0);
 }
 
 void SidebarController::ShowContextMenu(
@@ -333,16 +383,32 @@ void SidebarController::ShowContextMenu(
   bool canMoveUp = false;
   bool canMoveDown = false;
   if (selected >= 0 && selected < static_cast<int>(sidebarMap_.size())) {
-    const auto [bookmark, index] = sidebarMap_[selected];
-    if (bookmark) {
-      if (index < settings.bookmarks.size()) {
+    const EntryReference &reference = sidebarMap_[selected];
+    if (reference.bookmark) {
+      const auto found =
+          std::find_if(settings.bookmarks.begin(), settings.bookmarks.end(),
+                       [&reference](const Bookmark &entry) {
+                         return entry.id == reference.id;
+                       });
+      if (found != settings.bookmarks.end()) {
+        const std::size_t index = static_cast<std::size_t>(
+            std::distance(settings.bookmarks.begin(), found));
         canMoveUp = index > 0;
         canMoveDown = index + 1 < settings.bookmarks.size();
       }
-    } else if (index < settings.links.size()) {
-      canRunAsAdmin = settings.links[index].type == LinkType::Application;
-      canMoveUp = index > 0;
-      canMoveDown = index + 1 < settings.links.size();
+    } else {
+      const auto found =
+          std::find_if(settings.links.begin(), settings.links.end(),
+                       [&reference](const RegisteredLink &entry) {
+                         return entry.id == reference.id;
+                       });
+      if (found != settings.links.end()) {
+        const std::size_t index = static_cast<std::size_t>(
+            std::distance(settings.links.begin(), found));
+        canRunAsAdmin = found->type == LinkType::Application;
+        canMoveUp = index > 0;
+        canMoveDown = index + 1 < settings.links.size();
+      }
     }
   }
   AppendMenuW(menu, MF_STRING | (canRunAsAdmin ? 0 : MF_GRAYED),

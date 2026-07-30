@@ -39,7 +39,7 @@ void TestResolvePortablePath() {
 #else
       "/opt/SimpleFiler";
   const std::filesystem::path expectedChild =
-      "/opt/SimpleFiler/apps/editor";
+      "/opt/SimpleFiler/apps/editor.exe";
   const std::filesystem::path expectedParent = "/opt/shared";
   const std::filesystem::path absolute = "/usr/bin/viewer";
 #endif

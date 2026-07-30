@@ -1,5 +1,7 @@
 #pragma once
 
+#include "win/AsyncTaskTracker.h"
+
 #include <windows.h>
 
 #include <cstddef>
@@ -39,11 +41,11 @@ public:
                            const RefreshPaneFn &refreshPane);
 
   [[nodiscard]] std::size_t PendingOperationCount() const noexcept {
-    return pendingOperations_;
+    return tasks_.Size();
   }
 
 private:
-  std::size_t pendingOperations_ = 0;
+  AsyncTaskTracker tasks_;
 };
 
 } // namespace sf::win

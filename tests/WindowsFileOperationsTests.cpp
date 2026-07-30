@@ -29,7 +29,8 @@ LRESULT CALLBACK TestWindowProcedure(HWND window, UINT message, WPARAM wParam,
   return DefWindowProcW(window, message, wParam, lParam);
 }
 
-bool WaitForOperation(std::chrono::seconds timeout = std::chrono::seconds(10)) {
+bool WaitForOperation(sf::win::OperationId expectedId,
+                      std::chrono::seconds timeout = std::chrono::seconds(10)) {
   const auto deadline = std::chrono::steady_clock::now() + timeout;
   while (!operationResult && std::chrono::steady_clock::now() < deadline) {
     MSG message{};
@@ -39,7 +40,8 @@ bool WaitForOperation(std::chrono::seconds timeout = std::chrono::seconds(10)) {
     }
     MsgWaitForMultipleObjects(0, nullptr, FALSE, 50, QS_ALLINPUT);
   }
-  return operationResult && SUCCEEDED(operationResult->result) &&
+  return operationResult && operationResult->operationId == expectedId &&
+         SUCCEEDED(operationResult->result) &&
          !operationResult->aborted;
 }
 
@@ -135,9 +137,12 @@ int main() {
   const std::filesystem::path copySource = source / L"copy-日本語.txt";
   check(WriteTestFile(copySource, "copy"), "Copy source should be created");
   ResetOperation();
-  sf::win::TransferFilesAsync(window, {copySource.wstring()},
-                              destination.wstring(), false);
-  check(WaitForOperation(), "Direct shell copy should complete");
+  constexpr sf::win::OperationId copyOperationId = 1;
+  std::jthread copyTask = sf::win::TransferFilesAsync(
+      window, copyOperationId, {copySource.wstring()}, destination.wstring(),
+      false);
+  check(WaitForOperation(copyOperationId), "Direct shell copy should complete");
+  copyTask.join();
   check(std::filesystem::exists(copySource),
         "Copy should preserve the source file");
   check(std::filesystem::exists(destination / copySource.filename()),
@@ -146,17 +151,24 @@ int main() {
   const std::filesystem::path moveSource = source / L"move.txt";
   check(WriteTestFile(moveSource, "move"), "Move source should be created");
   ResetOperation();
-  sf::win::TransferFilesAsync(window, {moveSource.wstring()},
-                              destination.wstring(), true);
-  check(WaitForOperation(), "Direct shell move should complete");
+  constexpr sf::win::OperationId moveOperationId = 2;
+  std::jthread moveTask = sf::win::TransferFilesAsync(
+      window, moveOperationId, {moveSource.wstring()}, destination.wstring(),
+      true);
+  check(WaitForOperation(moveOperationId), "Direct shell move should complete");
+  moveTask.join();
   check(!std::filesystem::exists(moveSource),
         "Move should remove the source file");
   check(std::filesystem::exists(destination / moveSource.filename()),
         "Move should create the destination file");
 
   ResetOperation();
-  sf::win::CreateFolderAsync(window, destination.wstring(), L"new-folder");
-  check(WaitForOperation(), "Shell folder creation should complete");
+  constexpr sf::win::OperationId folderOperationId = 3;
+  std::jthread folderTask = sf::win::CreateFolderAsync(
+      window, folderOperationId, destination.wstring(), L"new-folder");
+  check(WaitForOperation(folderOperationId),
+        "Shell folder creation should complete");
+  folderTask.join();
   check(std::filesystem::is_directory(destination / L"new-folder"),
         "Shell folder creation should create a directory");
 
@@ -164,9 +176,12 @@ int main() {
   check(WriteTestFile(renameSource, "rename"),
         "Rename source should be created");
   ResetOperation();
-  sf::win::RenameFileAsync(window, renameSource.wstring(),
-                           L"rename-after.txt");
-  check(WaitForOperation(), "Shell rename should complete");
+  constexpr sf::win::OperationId renameOperationId = 4;
+  std::jthread renameTask =
+      sf::win::RenameFileAsync(window, renameOperationId,
+                               renameSource.wstring(), L"rename-after.txt");
+  check(WaitForOperation(renameOperationId), "Shell rename should complete");
+  renameTask.join();
   check(!std::filesystem::exists(renameSource) &&
             std::filesystem::exists(destination / L"rename-after.txt"),
         "Shell rename should change the file name");

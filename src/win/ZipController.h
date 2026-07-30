@@ -1,5 +1,7 @@
 #pragma once
 
+#include "win/AsyncTaskTracker.h"
+
 #include <windows.h>
 
 #include <cstddef>
@@ -22,15 +24,15 @@ public:
   void ExtractSelectedZip(HWND window,
                           const std::vector<std::wstring> &paths,
                           const NotifyFn &notify);
-  void HandleZipDone(LPARAM lParam, int activePane, const NotifyFn &notify,
+  void HandleZipDone(LPARAM lParam, const NotifyFn &notify,
                      const RefreshPaneFn &refreshPane);
 
   [[nodiscard]] std::size_t PendingOperationCount() const {
-    return pendingZipOperations_;
+    return tasks_.Size();
   }
 
 private:
-  std::size_t pendingZipOperations_ = 0;
+  AsyncTaskTracker tasks_;
 };
 
 } // namespace sf::win

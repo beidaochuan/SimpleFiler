@@ -12,16 +12,40 @@
 
 namespace sf::win {
 
+struct CommandAction final {
+  enum class Kind {
+    None,
+    Search,
+    Navigate,
+    LaunchApplication,
+    LaunchTerminal,
+    Error,
+  };
+
+  Kind kind = Kind::None;
+  std::string sourceId;
+  std::wstring value;
+  bool otherPane = false;
+  bool administrator = false;
+  bool passSelection = true;
+};
+
+enum class CommandRegistrationKind {
+  None,
+  Bookmark,
+  Application,
+};
+
+struct RegisteredApplicationLaunch final {
+  std::string sourceId;
+  bool administrator = false;
+  bool passSelection = true;
+  AppArgumentContext argumentContext;
+};
+
 class CommandController final {
 public:
   using NotifyFn = std::function<void(const std::wstring &message, bool error)>;
-  using StartSearchFn = std::function<void(const std::wstring &query)>;
-  using NavigateFn =
-      std::function<void(const std::wstring &path, bool otherPane)>;
-  using LaunchTerminalFn = std::function<void(bool administrator)>;
-  using AddBookmarkFn = std::function<void()>;
-  using AddApplicationFn = std::function<void()>;
-  using RebuildSuggestionsFn = std::function<void()>;
 
   CommandController() = default;
 
@@ -31,25 +55,20 @@ public:
                                  const std::wstring &terminalDirectory,
                                  const NotifyFn &notify);
   void MoveCommandSelection(HWND suggestions, int delta) const;
-  void AcceptCommandSuggestion(
-      HWND window, HWND searchEdit, HWND suggestions, HWND focusTarget,
-      const AppSettings &settings, const AppArgumentContext &argumentContext,
-      bool control, bool shift, const StartSearchFn &startSearch,
-      const NavigateFn &navigate, const LaunchTerminalFn &launchTerminal,
-      const NotifyFn &notify);
+  [[nodiscard]] CommandAction
+  AcceptCommandSuggestion(HWND searchEdit, HWND suggestions, HWND focusTarget,
+                          const AppSettings &settings, bool control,
+                          bool shift);
   void HideCommandSuggestions(HWND suggestions);
   void DismissCommandSuggestions(HWND searchEdit, HWND suggestions,
                                  HWND focusTarget, bool clearInput);
   [[nodiscard]] bool HandleCommandPrefixCharacter(
       HWND searchEdit, wchar_t character, HWND source);
-  void AddCommandRegistration(
-      HWND searchEdit, HWND suggestions, const AddBookmarkFn &addBookmark,
-      const AddApplicationFn &addApplication, const NotifyFn &notify,
-      const RebuildSuggestionsFn &rebuildSuggestions);
+  [[nodiscard]] CommandRegistrationKind
+  RequestCommandRegistration(HWND searchEdit, HWND suggestions);
   void LaunchRegisteredApplication(
-      HWND window, const AppSettings &settings, std::size_t index,
-      bool administrator, bool passSelection,
-      const AppArgumentContext &argumentContext,
+      HWND window, const AppSettings &settings,
+      const RegisteredApplicationLaunch &request,
       const NotifyFn &notify) const;
 
 private:
@@ -61,7 +80,7 @@ private:
 
   struct Suggestion final {
     SuggestionKind kind = SuggestionKind::Folder;
-    std::size_t sourceIndex = 0;
+    std::string sourceId;
     bool administrator = false;
     int score = 0;
     std::wstring label;

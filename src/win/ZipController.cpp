@@ -53,8 +53,9 @@ void ZipController::CreateZipFromSelection(
       notify(L"選択したファイル自身をZIP出力先にはできません", true);
       return;
     }
-    ++pendingZipOperations_;
-    CreateZipAsync(window, paths, output.data());
+    const OperationId operationId = tasks_.NextId();
+    tasks_.Track(operationId,
+                 CreateZipAsync(window, operationId, paths, output.data()));
     notify(L"ZIPを作成中です", false);
   }
 }
@@ -67,20 +68,21 @@ void ZipController::ExtractSelectedZip(
   const std::wstring destination = PickFolder(window, L"展開先を選択");
   if (destination.empty())
     return;
-  ++pendingZipOperations_;
-  ExtractZipAsync(window, paths.front(), destination);
+  const OperationId operationId = tasks_.NextId();
+  tasks_.Track(operationId,
+               ExtractZipAsync(window, operationId, paths.front(), destination));
   notify(L"ZIPを展開中です", false);
 }
 
-void ZipController::HandleZipDone(LPARAM lParam, int activePane,
-                                  const NotifyFn &notify,
+void ZipController::HandleZipDone(LPARAM lParam, const NotifyFn &notify,
                                   const RefreshPaneFn &refreshPane) {
   std::unique_ptr<ZipResult> result(reinterpret_cast<ZipResult *>(lParam));
-  if (pendingZipOperations_ > 0)
-    --pendingZipOperations_;
+  if (!tasks_.Complete(result->operationId))
+    return;
   if (result->success) {
     notify(result->message, false);
-    refreshPane(activePane);
+    refreshPane(0);
+    refreshPane(1);
   } else {
     notify(result->message, true);
   }

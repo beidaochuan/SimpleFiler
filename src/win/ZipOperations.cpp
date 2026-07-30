@@ -22,8 +22,8 @@ DWORD NotificationProcessId(HWND window) {
 }
 
 void Notify(HWND window, DWORD expectedProcessId, bool success,
-            std::wstring message) {
-  auto *result = new ZipResult{success, std::move(message)};
+            OperationId operationId, std::wstring message) {
+  auto *result = new ZipResult{operationId, success, std::move(message)};
   if (expectedProcessId == 0 ||
       NotificationProcessId(window) != expectedProcessId) {
     delete result;
@@ -41,15 +41,16 @@ std::wstring ZipErrorMessage(int32_t error) {
 
 } // namespace
 
-void CreateZipAsync(HWND notifyWindow, std::vector<std::wstring> sources,
-                    std::wstring outputPath) {
+std::jthread CreateZipAsync(HWND notifyWindow, OperationId operationId,
+                            std::vector<std::wstring> sources,
+                            std::wstring outputPath) {
   const DWORD notificationProcessId = NotificationProcessId(notifyWindow);
-  std::thread([notifyWindow, notificationProcessId,
-               sources = std::move(sources),
-               outputPath = std::move(outputPath)] {
+  return std::jthread([notifyWindow, notificationProcessId, operationId,
+                       sources = std::move(sources),
+                       outputPath = std::move(outputPath)] {
     void *writer = mz_zip_writer_create();
     if (writer == nullptr) {
-      Notify(notifyWindow, notificationProcessId, false,
+      Notify(notifyWindow, notificationProcessId, false, operationId,
              L"ZIPライターを初期化できません");
       return;
     }
@@ -74,25 +75,26 @@ void CreateZipAsync(HWND notifyWindow, std::vector<std::wstring> sources,
     const int32_t closeResult = mz_zip_writer_close(writer);
     mz_zip_writer_delete(&writer);
     if (result == MZ_OK && closeResult == MZ_OK) {
-      Notify(notifyWindow, notificationProcessId, true,
+      Notify(notifyWindow, notificationProcessId, true, operationId,
              L"ZIPを作成しました: " + outputPath);
     } else {
       DeleteFileW(outputPath.c_str());
-      Notify(notifyWindow, notificationProcessId, false,
+      Notify(notifyWindow, notificationProcessId, false, operationId,
              ZipErrorMessage(result != MZ_OK ? result : closeResult));
     }
-  }).detach();
+  });
 }
 
-void ExtractZipAsync(HWND notifyWindow, std::wstring archivePath,
-                     std::wstring destination) {
+std::jthread ExtractZipAsync(HWND notifyWindow, OperationId operationId,
+                             std::wstring archivePath,
+                             std::wstring destination) {
   const DWORD notificationProcessId = NotificationProcessId(notifyWindow);
-  std::thread([notifyWindow, notificationProcessId,
-               archivePath = std::move(archivePath),
-               destination = std::move(destination)] {
+  return std::jthread([notifyWindow, notificationProcessId, operationId,
+                       archivePath = std::move(archivePath),
+                       destination = std::move(destination)] {
     void *reader = mz_zip_reader_create();
     if (reader == nullptr) {
-      Notify(notifyWindow, notificationProcessId, false,
+      Notify(notifyWindow, notificationProcessId, false, operationId,
              L"ZIPリーダーを初期化できません");
       return;
     }
@@ -127,13 +129,13 @@ void ExtractZipAsync(HWND notifyWindow, std::wstring archivePath,
     mz_zip_reader_close(reader);
     mz_zip_reader_delete(&reader);
     if (result == MZ_OK) {
-      Notify(notifyWindow, notificationProcessId, true,
+      Notify(notifyWindow, notificationProcessId, true, operationId,
              L"ZIPを展開しました: " + destination);
     } else {
-      Notify(notifyWindow, notificationProcessId, false,
+      Notify(notifyWindow, notificationProcessId, false, operationId,
              ZipErrorMessage(result));
     }
-  }).detach();
+  });
 }
 
 } // namespace sf::win

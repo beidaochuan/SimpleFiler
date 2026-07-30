@@ -341,19 +341,19 @@ void ShellMenuController::ShowFileMenu(
   AppendMenuW(menu, MF_STRING, ids.open, L"開く");
 
   HMENU applications = CreatePopupMenu();
-  bool hasApplication = false;
-  for (std::size_t index = 0; index < settings.links.size(); ++index) {
-    const RegisteredLink &link = settings.links[index];
+  std::vector<std::string> applicationIds;
+  for (const RegisteredLink &link : settings.links) {
     if (link.type != LinkType::Application ||
-        ids.registeredApplicationBase + index > 0x7fff) {
+        ids.registeredApplicationBase + applicationIds.size() > 0x7fff) {
       continue;
     }
     const std::wstring name = Utf8ToWide(link.name);
     AppendMenuW(applications, MF_STRING,
-                ids.registeredApplicationBase + index, name.c_str());
-    hasApplication = true;
+                ids.registeredApplicationBase + applicationIds.size(),
+                name.c_str());
+    applicationIds.push_back(link.id);
   }
-  if (!hasApplication)
+  if (applicationIds.empty())
     AppendMenuW(applications, MF_STRING | MF_GRAYED, 0, L"登録アプリなし");
   AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(applications),
               L"登録アプリで開く");
@@ -376,8 +376,9 @@ void ShellMenuController::ShowFileMenu(
   DestroyMenu(menu);
   if (selectedCommand >= ids.registeredApplicationBase &&
       selectedCommand - ids.registeredApplicationBase <
-          settings.links.size()) {
-    launchApplication(selectedCommand - ids.registeredApplicationBase);
+          applicationIds.size()) {
+    launchApplication(
+        applicationIds[selectedCommand - ids.registeredApplicationBase]);
   } else if (selectedCommand != 0) {
     SendMessageW(window, WM_COMMAND, selectedCommand, 0);
   }

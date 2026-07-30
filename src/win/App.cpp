@@ -1021,45 +1021,59 @@ void App::OpenPaneSelection(int pane) {
       });
 }
 
-void App::LaunchRegisteredApplication(std::size_t index, bool administrator,
+void App::LaunchRegisteredApplication(const std::string &id,
+                                      bool administrator,
                                       bool passSelection) {
+  RegisteredApplicationLaunch request;
+  request.sourceId = id;
+  request.administrator = administrator;
+  request.passSelection = passSelection;
+  request.argumentContext = BuildAppArgumentContext(passSelection);
   commandController_.LaunchRegisteredApplication(
-      window_, settings_, index, administrator, passSelection,
-      BuildAppArgumentContext(passSelection),
+      window_, settings_, request,
       [this](const std::wstring &message, bool error) {
         Notify(message, error);
       });
 }
 
 void App::AcceptCommandSuggestion(bool control, bool shift) {
-  commandController_.AcceptCommandSuggestion(
-      window_, searchEdit_, commandSuggestions_,
-      paneController_.ListHandle(activePane_), settings_,
-      BuildAppArgumentContext(!shift), control, shift,
-      [this](const std::wstring &query) {
-        StartPaneSearch(activePane_, query);
-      },
-      [this](const std::wstring &path, bool otherPane) {
-        const int pane = otherPane && twoPanes_ ? 1 - activePane_ : activePane_;
-        NavigatePane(pane, path);
-        activePane_ = pane;
-        UpdateActivePaneVisuals();
-        UpdatePaneSearchState(activePane_,
-                              paneController_.IsSearchMode(activePane_),
-                              paneController_.IsBusy(activePane_));
-        SetFocus(paneController_.ListHandle(activePane_));
-      },
-      [this](bool administrator) {
-        terminalController_.LaunchSelectedTerminal(
-            window_, paneController_.EffectivePath(activePane_),
-            TerminalKind::CommandPrompt, administrator,
-            [this](const std::wstring &message, bool error) {
-              Notify(message, error);
-            });
-      },
-      [this](const std::wstring &message, bool error) {
-        Notify(message, error);
-      });
+  const CommandAction action = commandController_.AcceptCommandSuggestion(
+      searchEdit_, commandSuggestions_,
+      paneController_.ListHandle(activePane_), settings_, control, shift);
+  switch (action.kind) {
+  case CommandAction::Kind::None:
+    return;
+  case CommandAction::Kind::Search:
+    StartPaneSearch(activePane_, action.value);
+    return;
+  case CommandAction::Kind::Navigate: {
+    const int pane =
+        action.otherPane && twoPanes_ ? 1 - activePane_ : activePane_;
+    NavigatePane(pane, action.value);
+    activePane_ = pane;
+    UpdateActivePaneVisuals();
+    UpdatePaneSearchState(activePane_,
+                          paneController_.IsSearchMode(activePane_),
+                          paneController_.IsBusy(activePane_));
+    SetFocus(paneController_.ListHandle(activePane_));
+    return;
+  }
+  case CommandAction::Kind::LaunchApplication:
+    LaunchRegisteredApplication(action.sourceId, action.administrator,
+                                action.passSelection);
+    return;
+  case CommandAction::Kind::LaunchTerminal:
+    terminalController_.LaunchSelectedTerminal(
+        window_, paneController_.EffectivePath(activePane_),
+        TerminalKind::CommandPrompt, action.administrator,
+        [this](const std::wstring &message, bool error) {
+          Notify(message, error);
+        });
+    return;
+  case CommandAction::Kind::Error:
+    Notify(action.value, true);
+    return;
+  }
 }
 
 bool App::HandleOwnerDraw(WPARAM, LPARAM lParam, LRESULT &result) {
@@ -1400,7 +1414,7 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
         0) {
       const std::wstring closeWarning =
           std::format(L"ファイル処理が {} 件進行中です。\n"
-                      L"終了すると処理が途中で止まる可能性があります。\n\n"
+                      L"終了処理はファイル処理の完了まで待機します。\n\n"
                       L"それでも終了しますか？",
                       fileOperationController_.PendingOperationCount() +
                           zipController_.PendingOperationCount());
@@ -1448,8 +1462,8 @@ LRESULT App::HandleCommand(WPARAM wParam, LPARAM) {
     sidebarController_.ActivateSidebarItem(
         window_, sidebar_, settings_, false,
         [this](const std::wstring &path) { NavigatePane(activePane_, path); },
-        [this](std::size_t index, bool administrator) {
-          LaunchRegisteredApplication(index, administrator, true);
+        [this](const std::string &id, bool administrator) {
+          LaunchRegisteredApplication(id, administrator, true);
         },
         [this](const std::wstring &message, bool error) {
           Notify(message, error);
@@ -1706,8 +1720,8 @@ LRESULT App::HandleCommand(WPARAM wParam, LPARAM) {
     sidebarController_.ActivateSidebarItem(
         window_, sidebar_, settings_, false,
         [this](const std::wstring &path) { NavigatePane(activePane_, path); },
-        [this](std::size_t index, bool administrator) {
-          LaunchRegisteredApplication(index, administrator, true);
+        [this](const std::string &id, bool administrator) {
+          LaunchRegisteredApplication(id, administrator, true);
         },
         [this](const std::wstring &message, bool error) {
           Notify(message, error);
@@ -1717,8 +1731,8 @@ LRESULT App::HandleCommand(WPARAM wParam, LPARAM) {
     sidebarController_.ActivateSidebarItem(
         window_, sidebar_, settings_, true,
         [this](const std::wstring &path) { NavigatePane(activePane_, path); },
-        [this](std::size_t index, bool administrator) {
-          LaunchRegisteredApplication(index, administrator, true);
+        [this](const std::string &id, bool administrator) {
+          LaunchRegisteredApplication(id, administrator, true);
         },
         [this](const std::wstring &message, bool error) {
           Notify(message, error);
@@ -1778,8 +1792,8 @@ LRESULT App::HandleNotify(LPARAM lParam) {
         [this] { RefreshPaneView(activePane_); },
         [this] { OpenPaneSelection(activePane_); },
         [this] { paneController_.BeginRename(activePane_); },
-        [this](std::size_t index) {
-          LaunchRegisteredApplication(index, false, true);
+        [this](const std::string &id) {
+          LaunchRegisteredApplication(id, false, true);
         });
     PostMessageW(window_, kMessageRestoreFocus, 0, 0);
   } else if (header->code == LVN_KEYDOWN) {
@@ -1842,35 +1856,34 @@ bool App::HandleAppMessage(UINT message, WPARAM wParam, LPARAM lParam,
     result = 0;
     return true;
   case kMessageCommandNew:
-    commandController_.AddCommandRegistration(
-        searchEdit_, commandSuggestions_,
-        [this] {
-          sidebarController_.AddBookmarkForPath(
-              sidebar_, settings_, paneController_.EffectivePath(activePane_),
-              [this](const std::wstring &title, const std::wstring &label,
-                     const std::wstring &initial) {
-                return PromptText(title, label, initial);
-              },
-              [this] { SaveSettings(); });
-        },
-        [this] {
-          sidebarController_.AddLink(
-              window_, sidebar_, settings_, true,
-              [this](const std::wstring &title, const std::wstring &label,
-                     const std::wstring &initial) {
-                return PromptText(title, label, initial);
-              },
-              [this] { SaveSettings(); });
-        },
-        notify,
-        [this] {
-          commandController_.RebuildCommandSuggestions(
-              searchEdit_, commandSuggestions_, settings_,
-              paneController_.EffectivePath(activePane_),
-              [this](const std::wstring &text, bool error) {
-                Notify(text, error);
-              });
-        });
+    switch (commandController_.RequestCommandRegistration(
+        searchEdit_, commandSuggestions_)) {
+    case CommandRegistrationKind::Bookmark:
+      sidebarController_.AddBookmarkForPath(
+          sidebar_, settings_, paneController_.EffectivePath(activePane_),
+          [this](const std::wstring &title, const std::wstring &label,
+                 const std::wstring &initial) {
+            return PromptText(title, label, initial);
+          },
+          [this] { SaveSettings(); });
+      break;
+    case CommandRegistrationKind::Application:
+      sidebarController_.AddLink(
+          window_, sidebar_, settings_, true,
+          [this](const std::wstring &title, const std::wstring &label,
+                 const std::wstring &initial) {
+            return PromptText(title, label, initial);
+          },
+          [this] { SaveSettings(); });
+      break;
+    case CommandRegistrationKind::None:
+      notify(L"ff または aa コマンドを入力してから登録してください", true);
+      break;
+    }
+    SetFocus(searchEdit_);
+    commandController_.RebuildCommandSuggestions(
+        searchEdit_, commandSuggestions_, settings_,
+        paneController_.EffectivePath(activePane_), notify);
     result = 0;
     return true;
   case kMessageSidebarMove:
@@ -1916,7 +1929,7 @@ bool App::HandleAppMessage(UINT message, WPARAM wParam, LPARAM lParam,
     result = 0;
     return true;
   case kMessageZipDone:
-    zipController_.HandleZipDone(lParam, activePane_, notify,
+    zipController_.HandleZipDone(lParam, notify,
                                  [this](int pane) { RefreshPaneView(pane); });
     SetFocus(paneController_.ListHandle(activePane_));
     result = 0;

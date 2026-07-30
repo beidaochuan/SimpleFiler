@@ -68,8 +68,7 @@ if(WIN32)
     )
     FetchContent_MakeAvailable(minizip)
 
-    add_executable(SimpleFiler WIN32
-        src/win/App.cpp
+    add_library(simplefiler_win
         src/win/CommandController.cpp
         src/win/FileEnumerator.cpp
         src/win/FileOperationController.cpp
@@ -81,6 +80,30 @@ if(WIN32)
         src/win/TerminalLauncher.cpp
         src/win/ZipController.cpp
         src/win/ZipOperations.cpp
+    )
+    target_include_directories(simplefiler_win PUBLIC src)
+    target_compile_definitions(simplefiler_win PUBLIC
+        UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX
+        _WIN32_WINNT=0x0A00 NTDDI_VERSION=0x0A000000
+    )
+    if(MSVC)
+        target_compile_options(simplefiler_win PRIVATE
+            /W4 /permissive- /utf-8
+        )
+    else()
+        target_compile_options(simplefiler_win PRIVATE
+            -Wall -Wextra -Wpedantic
+        )
+    endif()
+    target_link_libraries(simplefiler_win PUBLIC
+        simplefiler_core
+        MINIZIP::minizip
+        comctl32 comdlg32 shell32 shlwapi ole32 oleaut32 uuid propsys
+        advapi32 uxtheme user32 version
+    )
+
+    add_executable(SimpleFiler WIN32
+        src/win/App.cpp
         src/win/main.cpp
         resources/SimpleFiler.rc
     )
@@ -99,10 +122,7 @@ if(WIN32)
         target_link_options(SimpleFiler PRIVATE -municode -static)
     endif()
     target_link_libraries(SimpleFiler PRIVATE
-        simplefiler_core
-        MINIZIP::minizip
-        comctl32 shell32 shlwapi ole32 oleaut32 uuid propsys advapi32 uxtheme
-        version
+        simplefiler_win
     )
 endif()
 
@@ -157,7 +177,6 @@ if(SIMPLEFILER_BUILD_TESTS)
     if(WIN32)
         add_executable(simplefiler_windows_file_tests
             tests/WindowsFileOperationsTests.cpp
-            src/win/ShellOperations.cpp
         )
         target_include_directories(simplefiler_windows_file_tests PRIVATE src)
         target_compile_definitions(simplefiler_windows_file_tests PRIVATE
@@ -170,7 +189,7 @@ if(SIMPLEFILER_BUILD_TESTS)
             )
         endif()
         target_link_libraries(simplefiler_windows_file_tests PRIVATE
-            simplefiler_core shell32 ole32 uuid
+            simplefiler_win
         )
         add_test(
             NAME simplefiler_windows_file_tests
@@ -181,7 +200,6 @@ if(SIMPLEFILER_BUILD_TESTS)
         )
         add_executable(simplefiler_file_enumerator_tests
             tests/FileEnumeratorTests.cpp
-            src/win/FileEnumerator.cpp
         )
         target_include_directories(simplefiler_file_enumerator_tests
             PRIVATE src
@@ -196,7 +214,7 @@ if(SIMPLEFILER_BUILD_TESTS)
             )
         endif()
         target_link_libraries(simplefiler_file_enumerator_tests PRIVATE
-            shell32
+            simplefiler_win
         )
         add_test(
             NAME simplefiler_file_enumerator_tests
@@ -204,6 +222,24 @@ if(SIMPLEFILER_BUILD_TESTS)
         )
         set_tests_properties(
             simplefiler_file_enumerator_tests PROPERTIES TIMEOUT 120
+        )
+        add_executable(simplefiler_controller_tests
+            tests/ControllerTests.cpp
+        )
+        target_link_libraries(simplefiler_controller_tests PRIVATE
+            simplefiler_win
+        )
+        if(MSVC)
+            target_compile_options(simplefiler_controller_tests
+                PRIVATE /W4 /permissive- /utf-8
+            )
+        endif()
+        add_test(
+            NAME simplefiler_controller_tests
+            COMMAND simplefiler_controller_tests
+        )
+        set_tests_properties(
+            simplefiler_controller_tests PROPERTIES TIMEOUT 30
         )
         add_test(
             NAME simplefiler_ui_smoke

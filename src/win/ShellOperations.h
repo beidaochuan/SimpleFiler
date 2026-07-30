@@ -1,8 +1,11 @@
 #pragma once
 
+#include "win/AsyncTaskTracker.h"
+
 #include <windows.h>
 
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace sf::win {
@@ -10,6 +13,7 @@ namespace sf::win {
 enum class FileOperationKind { Copy, Move, Delete, Rename };
 
 struct OperationResult final {
+  OperationId operationId = 0;
   HRESULT result = E_FAIL;
   bool aborted = false;
 };
@@ -18,15 +22,24 @@ struct OperationResult final {
                                        const std::vector<std::wstring> &paths,
                                        bool cut);
 [[nodiscard]] std::vector<std::wstring> ReadFilesFromClipboard(bool *cut);
-void PasteFilesAsync(HWND notifyWindow, const std::wstring &destination);
-void TransferFilesAsync(HWND notifyWindow, std::vector<std::wstring> paths,
-                        std::wstring destination, bool move);
-void DeleteFilesAsync(HWND notifyWindow, std::vector<std::wstring> paths,
-                      bool permanent);
-void RenameFileAsync(HWND notifyWindow, std::wstring path,
-                     std::wstring newName);
-void CreateFolderAsync(HWND notifyWindow, std::wstring parent,
-                       std::wstring name);
+[[nodiscard]] std::jthread PasteFilesAsync(HWND notifyWindow,
+                                           OperationId operationId,
+                                           const std::wstring &destination);
+[[nodiscard]] std::jthread
+TransferFilesAsync(HWND notifyWindow, OperationId operationId,
+                   std::vector<std::wstring> paths, std::wstring destination,
+                   bool move);
+[[nodiscard]] std::jthread
+DeleteFilesAsync(HWND notifyWindow, OperationId operationId,
+                 std::vector<std::wstring> paths, bool permanent);
+[[nodiscard]] std::jthread RenameFileAsync(HWND notifyWindow,
+                                           OperationId operationId,
+                                           std::wstring path,
+                                           std::wstring newName);
+[[nodiscard]] std::jthread CreateFolderAsync(HWND notifyWindow,
+                                             OperationId operationId,
+                                             std::wstring parent,
+                                             std::wstring name);
 
 [[nodiscard]] bool OpenPath(HWND owner, const std::wstring &path,
                             const std::wstring &arguments = {},

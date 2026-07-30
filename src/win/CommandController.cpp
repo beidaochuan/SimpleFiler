@@ -41,8 +41,7 @@ void CommandController::RebuildCommandSuggestions(
   };
 
   if (command.mode == CommandMode::Folder) {
-    for (std::size_t index = 0; index < settings.bookmarks.size(); ++index) {
-      const Bookmark &bookmark = settings.bookmarks[index];
+    for (const Bookmark &bookmark : settings.bookmarks) {
       const std::wstring name = Utf8ToWide(bookmark.name);
       const std::wstring path = Utf8ToWide(bookmark.path);
       const std::wstring alias = Utf8ToWide(bookmark.alias);
@@ -57,12 +56,11 @@ void CommandController::RebuildCommandSuggestions(
         const std::wstring label =
             alias.empty() ? name : name + L" [" + alias + L"]";
         suggestionItems_.push_back(
-            {SuggestionKind::Folder, index, false, *score, label, path});
+            {SuggestionKind::Folder, bookmark.id, false, *score, label, path});
       }
     }
   } else if (command.mode == CommandMode::Application) {
-    for (std::size_t index = 0; index < settings.links.size(); ++index) {
-      const RegisteredLink &link = settings.links[index];
+    for (const RegisteredLink &link : settings.links) {
       if (link.type != LinkType::Application)
         continue;
       const std::wstring name = Utf8ToWide(link.name);
@@ -79,7 +77,7 @@ void CommandController::RebuildCommandSuggestions(
         const std::wstring label =
             alias.empty() ? name : name + L" [" + alias + L"]";
         suggestionItems_.push_back(
-            {SuggestionKind::Application, index, false, *score, label,
+            {SuggestionKind::Application, link.id, false, *score, label,
              target});
       }
     }
@@ -90,7 +88,7 @@ void CommandController::RebuildCommandSuggestions(
               {true, L"admin 管理者", L"管理者CMDをここで開く"}}}) {
       const std::optional<int> score = bestScore({terms, label});
       if (score) {
-        suggestionItems_.push_back({SuggestionKind::Terminal, 0,
+        suggestionItems_.push_back({SuggestionKind::Terminal, {},
                                     administrator, *score, label,
                                     terminalDirectory});
       }
@@ -134,42 +132,63 @@ void CommandController::MoveCommandSelection(HWND suggestions,
   SendMessageW(suggestions, LB_SETCURSEL, selected, 0);
 }
 
-void CommandController::AcceptCommandSuggestion(
-    HWND window, HWND searchEdit, HWND suggestions, HWND focusTarget,
-    const AppSettings &settings, const AppArgumentContext &argumentContext,
-    bool control, bool shift, const StartSearchFn &startSearch,
-    const NavigateFn &navigate, const LaunchTerminalFn &launchTerminal,
-    const NotifyFn &notify) {
+CommandAction CommandController::AcceptCommandSuggestion(
+    HWND searchEdit, HWND suggestions, HWND focusTarget,
+    const AppSettings &settings, bool control, bool shift) {
   if (!IsWindowVisible(suggestions)) {
     if (HasCommandInput(searchEdit)) {
-      notify(L"実行できる候補がありません", true);
-      return;
+      return {CommandAction::Kind::Error, {}, L"実行できる候補がありません"};
     }
-    startSearch(GetWindowTextString(searchEdit));
-    return;
+    return {CommandAction::Kind::Search, {}, GetWindowTextString(searchEdit)};
   }
   const int selected =
       static_cast<int>(SendMessageW(suggestions, LB_GETCURSEL, 0, 0));
   if (selected < 0 || selected >= static_cast<int>(suggestionItems_.size()))
-    return;
+    return {};
   const Suggestion suggestion = suggestionItems_[selected];
   DismissCommandSuggestions(searchEdit, suggestions, focusTarget, true);
 
   switch (suggestion.kind) {
-  case SuggestionKind::Folder:
-    if (suggestion.sourceIndex < settings.bookmarks.size()) {
-      navigate(Utf8ToWide(settings.bookmarks[suggestion.sourceIndex].path),
-               shift);
+  case SuggestionKind::Folder: {
+    const auto bookmark =
+        std::find_if(settings.bookmarks.begin(), settings.bookmarks.end(),
+                     [&suggestion](const Bookmark &entry) {
+                       return entry.id == suggestion.sourceId;
+                     });
+    if (bookmark == settings.bookmarks.end()) {
+      return {CommandAction::Kind::Error, {},
+              L"候補のフォルダー登録が変更されました"};
     }
-    break;
-  case SuggestionKind::Application:
-    LaunchRegisteredApplication(window, settings, suggestion.sourceIndex,
-                                control, !shift, argumentContext, notify);
-    break;
-  case SuggestionKind::Terminal:
-    launchTerminal(suggestion.administrator);
-    break;
+    CommandAction action;
+    action.kind = CommandAction::Kind::Navigate;
+    action.sourceId = suggestion.sourceId;
+    action.value = Utf8ToWide(bookmark->path);
+    action.otherPane = shift;
+    return action;
   }
+  case SuggestionKind::Application: {
+    const auto application =
+        std::find_if(settings.links.begin(), settings.links.end(),
+                     [&suggestion](const RegisteredLink &entry) {
+                       return entry.id == suggestion.sourceId &&
+                              entry.type == LinkType::Application;
+                     });
+    if (application == settings.links.end()) {
+      return {CommandAction::Kind::Error, {},
+              L"候補のアプリ登録が変更されました"};
+    }
+    CommandAction action;
+    action.kind = CommandAction::Kind::LaunchApplication;
+    action.sourceId = suggestion.sourceId;
+    action.administrator = control;
+    action.passSelection = !shift;
+    return action;
+  }
+  case SuggestionKind::Terminal:
+    return {CommandAction::Kind::LaunchTerminal, {}, {}, false,
+            suggestion.administrator};
+  }
+  return {};
 }
 
 void CommandController::HideCommandSuggestions(HWND suggestions) {
@@ -228,34 +247,33 @@ bool CommandController::HandleCommandPrefixCharacter(
   return false;
 }
 
-void CommandController::AddCommandRegistration(
-    HWND searchEdit, HWND suggestions, const AddBookmarkFn &addBookmark,
-    const AddApplicationFn &addApplication, const NotifyFn &notify,
-    const RebuildSuggestionsFn &rebuildSuggestions) {
+CommandRegistrationKind CommandController::RequestCommandRegistration(
+    HWND searchEdit, HWND suggestions) {
   const CommandMode mode =
       ParseCommandQuery(GetWindowTextString(searchEdit)).mode;
-  ShowWindow(suggestions, SW_HIDE);
-  if (mode == CommandMode::Folder) {
-    addBookmark();
-  } else if (mode == CommandMode::Application) {
-    addApplication();
-  } else {
-    notify(L"ffまたはaaを入力してから登録してください", true);
-    return;
-  }
-  SetFocus(searchEdit);
-  rebuildSuggestions();
+  HideCommandSuggestions(suggestions);
+  if (mode == CommandMode::Folder)
+    return CommandRegistrationKind::Bookmark;
+  if (mode == CommandMode::Application)
+    return CommandRegistrationKind::Application;
+  return CommandRegistrationKind::None;
 }
 
 void CommandController::LaunchRegisteredApplication(
-    HWND window, const AppSettings &settings, std::size_t index,
-    bool administrator, bool passSelection,
-    const AppArgumentContext &argumentContext, const NotifyFn &notify) const {
-  if (index >= settings.links.size() ||
-      settings.links[index].type != LinkType::Application) {
+    HWND window, const AppSettings &settings,
+    const RegisteredApplicationLaunch &request,
+    const NotifyFn &notify) const {
+  const auto application =
+      std::find_if(settings.links.begin(), settings.links.end(),
+                   [&request](const RegisteredLink &entry) {
+                     return entry.id == request.sourceId &&
+                            entry.type == LinkType::Application;
+                   });
+  if (application == settings.links.end()) {
+    notify(L"登録アプリの内容が変更されました", true);
     return;
   }
-  const RegisteredLink &link = settings.links[index];
+  const RegisteredLink &link = *application;
   const std::wstring target = ResolveAppPath(Utf8ToWide(link.target));
   if (GetFileAttributesW(ToExtendedPath(target).c_str()) ==
       INVALID_FILE_ATTRIBUTES) {
@@ -267,17 +285,18 @@ void CommandController::LaunchRegisteredApplication(
   const std::wstring argumentTemplate = Utf8ToWide(link.arguments);
   if (!argumentTemplate.empty()) {
     const AppArgumentExpansion expansion =
-        ExpandAppArgumentTemplate(argumentTemplate, argumentContext);
+        ExpandAppArgumentTemplate(argumentTemplate, request.argumentContext);
     if (!expansion) {
       notify(L"アプリ引数を作成できません: " + expansion.error, true);
       return;
     }
     arguments = expansion.commandLine;
-  } else if (passSelection) {
-    if (argumentContext.files.empty()) {
-      arguments = QuoteWindowsCommandLineArgument(argumentContext.folder);
+  } else if (request.passSelection) {
+    if (request.argumentContext.files.empty()) {
+      arguments =
+          QuoteWindowsCommandLineArgument(request.argumentContext.folder);
     } else {
-      for (const std::wstring &path : argumentContext.files) {
+      for (const std::wstring &path : request.argumentContext.files) {
         if (!arguments.empty())
           arguments.push_back(L' ');
         arguments += QuoteWindowsCommandLineArgument(path);
@@ -288,9 +307,9 @@ void CommandController::LaunchRegisteredApplication(
   std::wstring workingDirectory =
       ResolveAppPath(Utf8ToWide(link.workingDirectory));
   if (workingDirectory.empty())
-    workingDirectory = argumentContext.folder;
+    workingDirectory = request.argumentContext.folder;
   if (!OpenPath(window, target, arguments, workingDirectory,
-                administrator || link.runAsAdministrator)) {
+                request.administrator || link.runAsAdministrator)) {
     const DWORD error = GetLastError();
     if (error != ERROR_CANCELLED) {
       notify(L"登録アプリを起動できません: " + WindowsErrorMessage(error), true);

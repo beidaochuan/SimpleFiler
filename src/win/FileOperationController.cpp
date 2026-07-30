@@ -29,8 +29,9 @@ void FileOperationController::TransferSelectionToOtherPane(
     notify(L"反対ペインのコピー先フォルダーがありません", true);
     return;
   }
-  ++pendingOperations_;
-  TransferFilesAsync(window, paths, destination, move);
+  const OperationId operationId = tasks_.NextId();
+  tasks_.Track(operationId,
+               TransferFilesAsync(window, operationId, paths, destination, move));
   notify(move ? L"反対ペインへの移動を開始しました"
               : L"反対ペインへのコピーを開始しました",
          false);
@@ -41,8 +42,9 @@ void FileOperationController::Paste(HWND window,
                                     const NotifyFn &notify) {
   if (destination.empty())
     return;
-  ++pendingOperations_;
-  PasteFilesAsync(window, destination);
+  const OperationId operationId = tasks_.NextId();
+  tasks_.Track(operationId,
+               PasteFilesAsync(window, operationId, destination));
   notify(L"ファイル操作を開始しました", false);
 }
 
@@ -52,8 +54,10 @@ void FileOperationController::DeleteSelection(HWND window,
                                               const NotifyFn &notify) {
   if (paths.empty())
     return;
-  ++pendingOperations_;
-  DeleteFilesAsync(window, std::move(paths), permanent);
+  const OperationId operationId = tasks_.NextId();
+  tasks_.Track(operationId,
+               DeleteFilesAsync(window, operationId, std::move(paths),
+                                permanent));
   notify(L"削除処理を開始しました", false);
 }
 
@@ -66,8 +70,9 @@ bool FileOperationController::RenameItem(HWND window, const std::wstring &path,
     notify(L"名前に使用できない文字があります", true);
     return false;
   }
-  ++pendingOperations_;
-  RenameFileAsync(window, path, newName);
+  const OperationId operationId = tasks_.NextId();
+  tasks_.Track(operationId,
+               RenameFileAsync(window, operationId, path, newName));
   return true;
 }
 
@@ -84,8 +89,9 @@ void FileOperationController::NewFolder(HWND window, const std::wstring &parent,
     notify(L"フォルダー名に使用できない文字があります", true);
     return;
   }
-  ++pendingOperations_;
-  CreateFolderAsync(window, parent, name);
+  const OperationId operationId = tasks_.NextId();
+  tasks_.Track(operationId,
+               CreateFolderAsync(window, operationId, parent, name));
   notify(L"フォルダーを作成中です", false);
 }
 
@@ -99,8 +105,8 @@ void FileOperationController::HandleOperationDone(
     LPARAM lParam, const NotifyFn &notify, const RefreshPaneFn &refreshPane) {
   std::unique_ptr<OperationResult> result(
       reinterpret_cast<OperationResult *>(lParam));
-  if (pendingOperations_ > 0)
-    --pendingOperations_;
+  if (!tasks_.Complete(result->operationId))
+    return;
   if (result->aborted) {
     notify(L"ファイル操作をキャンセルしました", false);
   } else if (FAILED(result->result)) {

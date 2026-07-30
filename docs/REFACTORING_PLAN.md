@@ -74,6 +74,7 @@ Windows x64 Releaseビルドと全CTest（UIスモークを含む6件）の通�
 ```cpp
 // ZipController.h
 #pragma once
+#include "win/AsyncTaskTracker.h"
 #include <windows.h>
 #include <cstddef>
 #include <functional>
@@ -95,15 +96,15 @@ public:
   void ExtractSelectedZip(HWND window,
                           const std::vector<std::wstring> &paths,
                           const NotifyFn &notify);
-  void HandleZipDone(LPARAM lParam, int activePane, const NotifyFn &notify,
+  void HandleZipDone(LPARAM lParam, const NotifyFn &notify,
                      const RefreshPaneFn &refreshPane);
 
   [[nodiscard]] std::size_t PendingOperationCount() const {
-    return pendingZipOperations_;
+    return tasks_.Size();
   }
 
 private:
-  std::size_t pendingZipOperations_ = 0;
+  AsyncTaskTracker tasks_;
 };
 
 } // namespace sf::win
@@ -114,7 +115,8 @@ private:
 `Notify(...)`呼び出しを`notify(...)`(第2引数を明示、`std::function`はデフォルト引数を
 持てない)に変える。`HasZipExtension`(App.cpp先頭の匿名namespace内)もこの`.cpp`に移す。
 `HandleZipDone`は現行の`kMessageZipDone`ケースの`reinterpret_cast<ZipResult*>`と
-減算・通知・`RefreshPane`呼び出しロジックを移す(`SetFocus`呼び出しはApp側に残す、
+タスク回収・通知・両ペインの`RefreshPane`呼び出しロジックを持つ
+(`SetFocus`呼び出しはApp側に残す、
 UI全体のフォーカス管理のため)。
 
 #### `src/win/TerminalController.h` / `.cpp`
@@ -654,6 +656,20 @@ Phase 1からPhase 6までの計画をすべて実装した。`App`はトップ�
 UI状態、設定、各コントローラー間の調停を担い、ZIP、端末、サイドバー、コマンド、
 シェルメニュー、ペイン、ファイル操作の機能固有状態と処理は各コントローラーへ
 分離されている。
+
+### Phase 6後レビューの堅牢化
+
+1. Windows実装を`simplefiler_win`ライブラリへ分離し、各コントローラーを直接検証する
+   `simplefiler_controller_tests`を追加する。
+2. ZIP完了時は操作開始後のアクティブペイン変更に依存せず、両ペインを更新する。
+3. ファイル・ZIP処理の`std::jthread`をコントローラーが操作ID付きで所有し、完了時または
+   終了時に確実に回収する。
+4. コマンド候補、サイドバー、登録アプリメニューはvector添字ではなく設定の安定IDを保持し、
+   並べ替えや削除後も実行対象を再解決する。
+5. `CommandController`は多数の実行コールバックを受け取らず、`CommandAction`を返して
+   `App`が画面遷移や起動を調停する。
+6. 非Windows環境のポータブルパステスト期待値を入力パスと一致させ、ホストCTestを
+   正常化する。
 
 ## 進行管理
 
