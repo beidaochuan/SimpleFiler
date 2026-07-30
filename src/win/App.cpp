@@ -424,9 +424,9 @@ HFONT CreateSectionFont(HFONT baseFont) {
 }
 
 void DrawRoundedSurface(HDC dc, RECT rect, COLORREF fill, COLORREF border,
-                        int radius) {
+                        int radius, int borderWidth = 1) {
   HBRUSH brush = CreateSolidBrush(fill);
-  HPEN pen = CreatePen(PS_SOLID, 1, border);
+  HPEN pen = CreatePen(PS_SOLID, borderWidth, border);
   const HGDIOBJ oldBrush = SelectObject(dc, brush);
   const HGDIOBJ oldPen = SelectObject(dc, pen);
   RoundRect(dc, rect.left, rect.top, rect.right, rect.bottom, radius, radius);
@@ -2423,7 +2423,10 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
       DrawRoundedSurface(
           dc, paneCardRects_[index],
           index == activePane_ ? kActivePaneColor : kSurfaceColor,
-          index == activePane_ ? kAccentColor : kBorderColor, radius);
+          index == activePane_ ? kAccentPressedColor : kBorderColor, radius,
+          index == activePane_
+              ? MulDiv(2, static_cast<int>(dpi_), USER_DEFAULT_SCREEN_DPI)
+              : 1);
     }
 
     HPEN separator = CreatePen(PS_SOLID, 1, kBorderColor);
