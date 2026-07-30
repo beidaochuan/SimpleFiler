@@ -2,5 +2,6 @@
 /.vs/
 /out/
 *.user
+/build.bat
 simplefiler.json
 simplefiler.json.broken-*
