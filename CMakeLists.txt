@@ -95,6 +95,7 @@ if(WIN32)
         simplefiler_core
         MINIZIP::minizip
         comctl32 shell32 shlwapi ole32 oleaut32 uuid propsys advapi32 uxtheme
+        version
     )
 endif()
 

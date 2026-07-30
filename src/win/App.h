@@ -129,6 +129,7 @@ private:
   void AddCommandRegistration();
   void LaunchRegisteredApplication(std::size_t index, bool administrator,
                                    bool passSelection);
+  void ShowAboutDialog();
 
   [[nodiscard]] std::vector<std::wstring> SelectedPaths() const;
   [[nodiscard]] int PaneIndexFromControl(HWND control) const;

@@ -15,10 +15,12 @@
 #include <shlwapi.h>
 #include <uxtheme.h>
 #include <windowsx.h>
+#include <winver.h>
 
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cstddef>
 #include <cwctype>
 #include <filesystem>
 #include <format>
@@ -27,6 +29,7 @@
 #include <numeric>
 #include <tuple>
 #include <unordered_set>
+#include <vector>
 
 namespace sf::win {
 namespace {
@@ -101,6 +104,8 @@ enum ControlId : int {
   IdMoveSidebarUp,
   IdMoveSidebarDown,
   IdPromptEdit = 400,
+  // WM_SYSCOMMAND requires the low 4 bits of a custom command id to be zero.
+  IdShowAbout = 416,
   IdRegisteredAppBase = 1000,
   IdShellMenuFirst = 2000,
   IdShellMenuLast = 2999
@@ -287,6 +292,63 @@ std::wstring HomeDirectory() {
     result = path;
     CoTaskMemFree(path);
   }
+  return result;
+}
+
+std::wstring ApplicationVersionString() {
+  const std::wstring executablePath = ExecutablePath().wstring();
+  DWORD handle = 0;
+  const DWORD size =
+      GetFileVersionInfoSizeW(executablePath.c_str(), &handle);
+  if (size == 0)
+    return L"不明";
+  std::vector<std::byte> buffer(size);
+  if (!GetFileVersionInfoW(executablePath.c_str(), handle, size,
+                            buffer.data())) {
+    return L"不明";
+  }
+  void *value = nullptr;
+  UINT valueSize = 0;
+  if (!VerQueryValueW(buffer.data(), LR"(\StringFileInfo\041104B0\FileVersion)",
+                      &value, &valueSize) ||
+      value == nullptr || valueSize == 0) {
+    return L"不明";
+  }
+  return std::wstring(static_cast<const wchar_t *>(value));
+}
+
+thread_local HWND g_messageBoxCenterParent = nullptr;
+
+LRESULT CALLBACK CenterMessageBoxHookProcedure(int code, WPARAM wParam,
+                                               LPARAM lParam) {
+  if (code == HCBT_ACTIVATE && g_messageBoxCenterParent != nullptr) {
+    const HWND dialog = reinterpret_cast<HWND>(wParam);
+    RECT parentRect{};
+    RECT dialogRect{};
+    if (GetWindowRect(g_messageBoxCenterParent, &parentRect) &&
+        GetWindowRect(dialog, &dialogRect)) {
+      const int dialogWidth = dialogRect.right - dialogRect.left;
+      const int dialogHeight = dialogRect.bottom - dialogRect.top;
+      const int x = parentRect.left +
+                    ((parentRect.right - parentRect.left) - dialogWidth) / 2;
+      const int y = parentRect.top +
+                    ((parentRect.bottom - parentRect.top) - dialogHeight) / 2;
+      SetWindowPos(dialog, nullptr, x, y, 0, 0,
+                   SWP_NOSIZE | SWP_NOZORDER);
+    }
+  }
+  return CallNextHookEx(nullptr, code, wParam, lParam);
+}
+
+int ShowMessageBoxCenteredOnParent(HWND parent, const std::wstring &text,
+                                   const std::wstring &title, UINT type) {
+  g_messageBoxCenterParent = parent;
+  const HHOOK hook = SetWindowsHookExW(WH_CBT, CenterMessageBoxHookProcedure,
+                                       nullptr, GetCurrentThreadId());
+  const int result = MessageBoxW(parent, text.c_str(), title.c_str(), type);
+  if (hook != nullptr)
+    UnhookWindowsHookEx(hook);
+  g_messageBoxCenterParent = nullptr;
   return result;
 }
 
@@ -537,6 +599,12 @@ bool App::CreateMainWindow(int showCommand) {
                             nullptr, nullptr, instance_, this);
   if (window_ == nullptr)
     return false;
+  const HMENU systemMenu = GetSystemMenu(window_, FALSE);
+  if (systemMenu != nullptr) {
+    AppendMenuW(systemMenu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(systemMenu, MF_STRING, IdShowAbout,
+                L"SimpleFiler について");
+  }
   CreateControls();
   CreateAccelerators();
   ShowWindow(window_, settings_.maximized ? SW_MAXIMIZE : showCommand);
@@ -2353,6 +2421,20 @@ void App::Notify(const std::wstring &message, bool error) {
                  (error ? L"⚠  " + message : L"●  " + message).c_str());
 }
 
+void App::ShowAboutDialog() {
+  const std::wstring message =
+      L"SimpleFiler " + ApplicationVersionString() +
+      L"\n\n"
+      L"Copyright (c) 2026 beidaochuan\n"
+      L"MIT License\n\n"
+      L"このソフトウェアは以下のライブラリを使用しています:\n"
+      L"- minizip-ng (zlib license)\n"
+      L"- zlib-ng (zlib license)\n\n"
+      L"詳細は LICENSE および THIRD_PARTY_NOTICES.md を参照してください。";
+  ShowMessageBoxCenteredOnParent(window_, message, L"SimpleFiler について",
+                                MB_OK | MB_ICONINFORMATION);
+}
+
 LRESULT CALLBACK App::WindowProcedure(HWND window, UINT message, WPARAM wParam,
                                       LPARAM lParam) {
   App *app = reinterpret_cast<App *>(GetWindowLongPtrW(window, GWLP_USERDATA));
@@ -2368,6 +2450,12 @@ LRESULT CALLBACK App::WindowProcedure(HWND window, UINT message, WPARAM wParam,
 
 LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
   switch (message) {
+  case WM_SYSCOMMAND:
+    if ((wParam & 0xFFF0) == IdShowAbout) {
+      ShowAboutDialog();
+      return 0;
+    }
+    break;
   case WM_ACTIVATE:
     if (LOWORD(wParam) != WA_INACTIVE)
       PostMessageW(window_, kMessageRestoreFocus, 0, 0);
