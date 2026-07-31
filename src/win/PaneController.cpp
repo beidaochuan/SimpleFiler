@@ -94,6 +94,7 @@ void PaneController::Navigate(HWND window, int paneIndex,
 
   Pane &pane = panes_[paneIndex];
   RetireWorker(pane);
+  pane.pendingSelectionPath.clear();
   pane.path = path.wstring();
   pane.searchMode = false;
   pane.searchRoot.clear();
@@ -134,6 +135,7 @@ void PaneController::ShowDrives(HWND, int paneIndex, bool addHistory,
     return;
   Pane &pane = panes_[paneIndex];
   RetireWorker(pane);
+  pane.pendingSelectionPath.clear();
   pane.path.clear();
   pane.searchRoot.clear();
   pane.searchMode = false;
@@ -202,15 +204,20 @@ void PaneController::NavigateUp(HWND window, int paneIndex,
                                 const SearchStateFn &searchState) {
   if (!IsValidPane(paneIndex))
     return;
-  const Pane &pane = panes_[paneIndex];
+  Pane &pane = panes_[paneIndex];
   if (pane.driveView || pane.path.empty())
     return;
+  const std::wstring childPath = pane.path;
   const std::filesystem::path parent =
       std::filesystem::path(pane.path).parent_path();
-  if (parent == pane.path || parent.empty())
+  if (parent == pane.path || parent.empty()) {
     ShowDrives(window, paneIndex, true, notify, searchState);
-  else
+    pane.pendingSelectionPath = childPath;
+    RestorePendingSelection(paneIndex);
+  } else {
     Navigate(window, paneIndex, parent.wstring(), true, notify, searchState);
+    pane.pendingSelectionPath = childPath;
+  }
 }
 
 void PaneController::RefreshPane(HWND window, int paneIndex,
@@ -244,6 +251,7 @@ void PaneController::StartSearch(HWND window, int paneIndex,
     return;
   }
   RetireWorker(pane);
+  pane.pendingSelectionPath.clear();
   pane.searchRoot = pane.searchMode ? pane.searchRoot : pane.path;
   pane.searchQuery = query;
   pane.searchMode = true;
@@ -320,6 +328,7 @@ void PaneController::HandleEnumerationDone(LPARAM lParam,
   pane.busy = false;
   searchState(done->pane, pane.searchMode, pane.busy);
   SortPane(done->pane);
+  RestorePendingSelection(done->pane);
   if (done->error == ERROR_SUCCESS) {
     notify(std::format(L"{} 項目", done->itemCount), false);
   } else if (done->error != ERROR_CANCELLED) {
@@ -465,6 +474,30 @@ bool PaneController::HasPath(int pane) const {
 
 bool PaneController::IsValidPane(int pane) noexcept {
   return pane >= 0 && pane < 2;
+}
+
+void PaneController::RestorePendingSelection(int paneIndex) {
+  Pane &pane = panes_[paneIndex];
+  if (pane.pendingSelectionPath.empty())
+    return;
+
+  const auto found =
+      std::find_if(pane.items.begin(), pane.items.end(),
+                   [&pane](const FileItem &item) {
+                     return _wcsicmp(item.path.c_str(),
+                                     pane.pendingSelectionPath.c_str()) == 0;
+                   });
+  pane.pendingSelectionPath.clear();
+  if (found == pane.items.end())
+    return;
+
+  const int index =
+      static_cast<int>(std::distance(pane.items.begin(), found));
+  ListView_SetItemState(pane.list, -1, 0, LVIS_SELECTED | LVIS_FOCUSED);
+  ListView_SetItemState(pane.list, index, LVIS_SELECTED | LVIS_FOCUSED,
+                        LVIS_SELECTED | LVIS_FOCUSED);
+  ListView_SetSelectionMark(pane.list, index);
+  ListView_EnsureVisible(pane.list, index, FALSE);
 }
 
 void PaneController::SortPane(int paneIndex) {

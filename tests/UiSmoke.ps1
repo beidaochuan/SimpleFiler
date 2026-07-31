@@ -198,6 +198,7 @@ function Set-ForegroundReliable {
 
 $testRoot = Join-Path ([IO.Path]::GetTempPath()) (
     'simplefiler-ui-' + [Guid]::NewGuid().ToString('N'))
+$navigationFolder = Join-Path $testRoot '00-navigation-target'
 $targetFolder = Join-Path $testRoot 'jump-target'
 $sidebarTarget = Join-Path $testRoot 'sidebar-target'
 $appPath = Join-Path $testRoot 'SimpleFiler.exe'
@@ -205,6 +206,7 @@ $appLaunchMarker = Join-Path $testRoot 'aa-launch-marker.txt'
 $process = $null
 
 try {
+    New-Item -ItemType Directory -Path $navigationFolder | Out-Null
     New-Item -ItemType Directory -Path $targetFolder | Out-Null
     New-Item -ItemType Directory -Path $sidebarTarget | Out-Null
     Copy-Item -LiteralPath $Executable -Destination $appPath
@@ -354,6 +356,61 @@ try {
     if (!$focusedOnLeft) {
         throw 'Could not focus the left file pane before prompt test'
     }
+
+    # Backspace to the parent must restore selection to the folder that was
+    # just left. Otherwise the next Down key starts again from the first item.
+    if (!(Wait-Until -Condition {
+            [SimpleFilerNativeMethods]::SendMessage(
+                $leftList, 0x1004, [IntPtr]::Zero,
+                [IntPtr]::Zero).ToInt32() -ge 5
+        })) {
+        throw 'The left pane did not enumerate folders for navigation test'
+    }
+    Start-Sleep -Milliseconds 100
+    [SimpleFilerNativeMethods]::keybd_event(
+        0x24, 0, 0, [UIntPtr]::Zero)
+    [SimpleFilerNativeMethods]::keybd_event(
+        0x24, 0, 2, [UIntPtr]::Zero)
+    [SimpleFilerNativeMethods]::keybd_event(
+        0x0D, 0, 0, [UIntPtr]::Zero)
+    [SimpleFilerNativeMethods]::keybd_event(
+        0x0D, 0, 2, [UIntPtr]::Zero)
+    if (!(Wait-Until -Condition {
+            $initialAddress.Clear() | Out-Null
+            [void][SimpleFilerNativeMethods]::SendMessageGetText(
+                $leftAddress, 0x000D, [IntPtr]$initialAddress.Capacity,
+                $initialAddress)
+            $initialAddress.ToString() -eq $navigationFolder
+        })) {
+        throw 'Enter did not open the first folder for navigation test'
+    }
+    [SimpleFilerNativeMethods]::keybd_event(
+        0x08, 0, 0, [UIntPtr]::Zero)
+    [SimpleFilerNativeMethods]::keybd_event(
+        0x08, 0, 2, [UIntPtr]::Zero)
+    if (!(Wait-Until -Condition {
+            $initialAddress.Clear() | Out-Null
+            [void][SimpleFilerNativeMethods]::SendMessageGetText(
+                $leftAddress, 0x000D, [IntPtr]$initialAddress.Capacity,
+                $initialAddress)
+            $selected = [SimpleFilerNativeMethods]::SendMessage(
+                $leftList, 0x100C, [IntPtr](-1), [IntPtr]2).ToInt32()
+            $initialAddress.ToString() -eq $testRoot -and $selected -eq 0
+        })) {
+        throw 'Backspace did not restore selection to the folder just left'
+    }
+    [SimpleFilerNativeMethods]::keybd_event(
+        0x28, 0, 0, [UIntPtr]::Zero)
+    [SimpleFilerNativeMethods]::keybd_event(
+        0x28, 0, 2, [UIntPtr]::Zero)
+    if (!(Wait-Until -Condition {
+            [SimpleFilerNativeMethods]::SendMessage(
+                $leftList, 0x100C, [IntPtr](-1),
+                [IntPtr]2).ToInt32() -eq 1
+        })) {
+        throw 'Down restarted at the first item after Backspace navigation'
+    }
+
     # Ctrl+N goes through the hardware input queue too, so resend it while no
     # prompt has appeared yet in case an earlier attempt missed the foreground
     # window.
