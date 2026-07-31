@@ -628,7 +628,7 @@ void App::LayoutControls(int width, int height) {
   const int splitterWidth = scale(kSplitterWidth);
   int x = gap;
   const int buttonHeight = scale(32);
-  const int searchHeight = scale(30);
+  const int searchHeight = addressHeight;
   const int buttonTop = (toolbarHeight - buttonHeight) / 2;
   const int searchTop = (toolbarHeight - searchHeight) / 2;
   const int buttonGap = scale(7);
