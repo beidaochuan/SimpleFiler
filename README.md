@@ -148,7 +148,7 @@ ctest --preset windows-x64
 cmake --build build/windows-x64 --config Release --target PACKAGE
 ```
 
-配布物は`build/windows-x64/SimpleFiler-0.1.0-windows-x64.zip`に生成されます。
+配布物は`build/windows-x64/SimpleFiler-0.0.1-windows-x64.zip`に生成されます。
 ZIPには初期設定ファイルを含めず、初回の正常終了時にEXEの隣へ作成します。
 
 ## 初版で含まないもの
