@@ -373,6 +373,26 @@ void DrawRoundedSurface(HDC dc, RECT rect, COLORREF fill, COLORREF border,
   DeleteObject(brush);
 }
 
+void DrawDropDownIndicator(HDC dc, int centerX, int centerY, COLORREF color,
+                           UINT dpi) {
+  const int width =
+      MulDiv(12, static_cast<int>(dpi), USER_DEFAULT_SCREEN_DPI);
+  const int height =
+      MulDiv(7, static_cast<int>(dpi), USER_DEFAULT_SCREEN_DPI);
+  const std::array<POINT, 3> points{{
+      {centerX - width / 2, centerY - height / 2},
+      {centerX + (width + 1) / 2, centerY - height / 2},
+      {centerX, centerY + (height + 1) / 2},
+  }};
+  HBRUSH brush = CreateSolidBrush(color);
+  const HGDIOBJ oldBrush = SelectObject(dc, brush);
+  const HGDIOBJ oldPen = SelectObject(dc, GetStockObject(NULL_PEN));
+  Polygon(dc, points.data(), static_cast<int>(points.size()));
+  SelectObject(dc, oldPen);
+  SelectObject(dc, oldBrush);
+  DeleteObject(brush);
+}
+
 bool IsRectVisible(const RECT &rect) {
   return rect.right > rect.left && rect.bottom > rect.top;
 }
@@ -491,8 +511,8 @@ void App::CreateControls() {
        {L"1｜2", IdTogglePanes},
        {L"サイド", IdToggleSidebar},
        {L"★ 追加", IdAddBookmark},
-       {L"リンク ▾", IdAddLink},
-       {L"端末 ▾", IdTerminal}}};
+       {L"リンク", IdAddLink},
+       {L"端末", IdTerminal}}};
   for (std::size_t index = 0; index < buttons.size(); ++index) {
     toolbar_[index] = CreateWindowExW(
         0, L"BUTTON", buttons[index].first,
@@ -1080,6 +1100,8 @@ bool App::HandleOwnerDraw(WPARAM, LPARAM lParam, LRESULT &result) {
   auto *item = reinterpret_cast<DRAWITEMSTRUCT *>(lParam);
   if (item->CtlType == ODT_BUTTON) {
     const bool primary = item->hwndItem == toolbar_[6];
+    const bool hasDropDown =
+        item->CtlID == IdAddLink || item->CtlID == IdTerminal;
     const bool pressed = (item->itemState & ODS_SELECTED) != 0;
     const bool disabled = (item->itemState & ODS_DISABLED) != 0;
     const bool hot = (item->itemState & ODS_HOTLIGHT) != 0;
@@ -1106,11 +1128,40 @@ bool App::HandleOwnerDraw(WPARAM, LPARAM lParam, LRESULT &result) {
     GetWindowTextW(item->hwndItem, label, static_cast<int>(std::size(label)));
     SetBkMode(item->hDC, TRANSPARENT);
     SetTextColor(item->hDC, text);
+    const HFONT font =
+        reinterpret_cast<HFONT>(SendMessageW(item->hwndItem, WM_GETFONT, 0, 0));
+    const HGDIOBJ oldFont =
+        font != nullptr ? SelectObject(item->hDC, font) : nullptr;
     RECT textRect = item->rcItem;
     if (pressed)
       OffsetRect(&textRect, 0, 1);
-    DrawTextW(item->hDC, label, -1, &textRect,
-              DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    if (hasDropDown) {
+      RECT measured{};
+      DrawTextW(item->hDC, label, -1, &measured,
+                DT_CALCRECT | DT_SINGLELINE | DT_NOPREFIX);
+      const int arrowWidth =
+          MulDiv(12, static_cast<int>(dpi_), USER_DEFAULT_SCREEN_DPI);
+      const int arrowGap =
+          MulDiv(6, static_cast<int>(dpi_), USER_DEFAULT_SCREEN_DPI);
+      const int contentWidth = measured.right + arrowGap + arrowWidth;
+      const int contentLeft =
+          textRect.left +
+          ((textRect.right - textRect.left) - contentWidth) / 2;
+      textRect.left = contentLeft;
+      textRect.right = contentLeft + measured.right;
+      DrawTextW(item->hDC, label, -1, &textRect,
+                DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS |
+                    DT_NOPREFIX);
+      DrawDropDownIndicator(
+          item->hDC, textRect.right + arrowGap + arrowWidth / 2,
+          (textRect.top + textRect.bottom) / 2, text, dpi_);
+    } else {
+      DrawTextW(item->hDC, label, -1, &textRect,
+                DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS |
+                    DT_NOPREFIX);
+    }
+    if (oldFont != nullptr)
+      SelectObject(item->hDC, oldFont);
     if ((item->itemState & ODS_FOCUS) != 0) {
       RECT focus = button;
       InflateRect(&focus, -3, -3);
