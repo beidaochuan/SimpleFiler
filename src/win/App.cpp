@@ -1351,7 +1351,7 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
       DrawRoundedSurface(
           dc, paneCardRects_[index],
           index == activePane_ ? kActivePaneColor : kSurfaceColor,
-          index == activePane_ ? kAccentPressedColor : kBorderColor, radius,
+          index == activePane_ ? kAccentColor : kBorderColor, radius,
           index == activePane_
               ? MulDiv(2, static_cast<int>(dpi_), USER_DEFAULT_SCREEN_DPI)
               : 1);
