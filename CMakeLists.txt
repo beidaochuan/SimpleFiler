@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(SimpleFiler VERSION 0.0.1 LANGUAGES CXX)
+project(SimpleFiler VERSION 0.0.2 LANGUAGES CXX)
 
 option(SIMPLEFILER_BUILD_TESTS "Build unit tests" ON)
 
@@ -257,7 +257,6 @@ if(WIN32)
     install(TARGETS SimpleFiler RUNTIME DESTINATION .)
     install(FILES
         README.md
-        PLAN.md
         LICENSE
         THIRD_PARTY_NOTICES.md
         DESTINATION .
