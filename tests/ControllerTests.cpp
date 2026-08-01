@@ -1,4 +1,6 @@
 #include "core/Settings.h"
+#include "win/AddressBar.h"
+#include "win/AppMessages.h"
 #include "win/AsyncTaskTracker.h"
 #include "win/CommandController.h"
 #include "win/FileOperationController.h"
@@ -24,6 +26,8 @@
 namespace {
 
 int failures = 0;
+int breadcrumbPane = -1;
+std::wstring breadcrumbTarget;
 
 void Check(bool condition, const char *message) {
   if (!condition) {
@@ -34,6 +38,12 @@ void Check(bool condition, const char *message) {
 
 LRESULT CALLBACK TestWindowProcedure(HWND window, UINT message, WPARAM wParam,
                                      LPARAM lParam) {
+  if (message == sf::win::kMessageNavigateBreadcrumb) {
+    breadcrumbPane = static_cast<int>(wParam);
+    const auto *target = reinterpret_cast<const std::wstring *>(lParam);
+    breadcrumbTarget = target != nullptr ? *target : L"<null>";
+    return 0;
+  }
   return DefWindowProcW(window, message, wParam, lParam);
 }
 
@@ -237,6 +247,19 @@ void TestPaneController(const TestControls &controls) {
         "Pane settings should round-trip through the controller");
 }
 
+void TestAddressBar(const TestControls &controls) {
+  breadcrumbPane = -1;
+  breadcrumbTarget = L"<unset>";
+  SetWindowTextW(controls.Edit(), LR"(D:\home\ngrcu)");
+  sf::win::AttachAddressBar(controls.Edit(), 1);
+  SetFocus(controls.List());
+
+  SendMessageW(controls.Edit(), WM_LBUTTONDOWN, MK_LBUTTON,
+               MAKELPARAM(8, 12));
+  Check(breadcrumbPane == 1 && breadcrumbTarget.empty(),
+        "The PC breadcrumb should synchronously request the drive view");
+}
+
 void TestOperationControllers() {
   sf::win::FileOperationController fileController;
   int fileErrors = 0;
@@ -325,6 +348,7 @@ int main() {
   TestPaneController(controls);
   TestOperationControllers();
   TestTerminalAndShellMenuControllers(controls);
+  TestAddressBar(controls);
 
   if (failures == 0)
     std::cout << "Controller tests passed\n";

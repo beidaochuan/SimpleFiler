@@ -17,6 +17,7 @@ add_library(simplefiler_core
     src/core/ArchivePath.cpp
     src/core/CommandQuery.cpp
     src/core/Json.cpp
+    src/core/PathBreadcrumbs.cpp
     src/core/PortablePath.cpp
     src/core/Settings.cpp
     src/core/TerminalCommand.cpp
@@ -69,6 +70,7 @@ if(WIN32)
     FetchContent_MakeAvailable(minizip)
 
     add_library(simplefiler_win
+        src/win/AddressBar.cpp
         src/win/CommandController.cpp
         src/win/FileEnumerator.cpp
         src/win/FileOperationController.cpp
