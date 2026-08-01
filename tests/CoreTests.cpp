@@ -1,6 +1,7 @@
 #include "core/ArchivePath.h"
 #include "core/CommandQuery.h"
 #include "core/Json.h"
+#include "core/PathBreadcrumbs.h"
 #include "core/Settings.h"
 #include "core/TerminalCommand.h"
 
@@ -248,6 +249,35 @@ void TestCommandQueries() {
         "unmatched command candidates should be rejected");
 }
 
+void TestPathBreadcrumbs() {
+  const auto local = sf::BuildPathBreadcrumbs(LR"(D:\home\ngrcu)");
+  Check(local.size() == 4 && local[0].label == L"PC" &&
+            local[0].path.empty() && local[1].label == L"D:" &&
+            local[1].path == LR"(D:\)" && local[2].label == L"home" &&
+            local[2].path == LR"(D:\home)" &&
+            local[3].label == L"ngrcu" &&
+            local[3].path == LR"(D:\home\ngrcu)",
+        "Local paths should produce a clickable breadcrumb for each level");
+
+  const auto unc =
+      sf::BuildPathBreadcrumbs(LR"(\\server\share\projects\simplefiler)");
+  Check(unc.size() == 5 && unc[1].label == LR"(\\server)" &&
+            unc[1].path == LR"(\\server)" && unc[2].label == L"share" &&
+            unc[2].path == LR"(\\server\share)" &&
+            unc[4].path == LR"(\\server\share\projects\simplefiler)",
+        "UNC paths should preserve server and share navigation targets");
+
+  const auto search =
+      sf::BuildPathBreadcrumbs(LR"(検索: C:\work\results)");
+  Check(search.size() == 4 && search.back().label == L"results" &&
+            search.back().path == LR"(C:\work\results)",
+        "Search result addresses should breadcrumb the search root");
+
+  const auto drives = sf::BuildPathBreadcrumbs(L"PC");
+  Check(drives.size() == 1 && drives.front().path.empty(),
+        "The PC address should map to the drive view");
+}
+
 } // namespace
 
 int main() {
@@ -257,6 +287,7 @@ int main() {
   TestTerminalCommands();
   TestArchivePaths();
   TestCommandQueries();
+  TestPathBreadcrumbs();
   if (failures == 0) {
     std::cout << "All core tests passed\n";
   }

@@ -1,6 +1,7 @@
 #include "win/App.h"
 
 #include "core/AppArguments.h"
+#include "win/AddressBar.h"
 #include "win/AppMessages.h"
 #include "win/ShellOperations.h"
 #include "win/WinUtils.h"
@@ -173,9 +174,9 @@ LRESULT CALLBACK PromptProcedure(HWND window, UINT message, WPARAM wParam,
   return DefWindowProcW(window, message, wParam, lParam);
 }
 
-LRESULT CALLBACK EditSubclass(HWND window, UINT message, WPARAM wParam,
-                              LPARAM lParam, UINT_PTR, DWORD_PTR reference) {
-  if (message == WM_PAINT && reference == 2) {
+LRESULT CALLBACK SearchEditSubclass(HWND window, UINT message, WPARAM wParam,
+                                    LPARAM lParam, UINT_PTR, DWORD_PTR) {
+  if (message == WM_PAINT) {
     const LRESULT result = DefSubclassProc(window, message, wParam, lParam);
     if (GetWindowTextLengthW(window) == 0) {
       HDC dc = GetDC(window);
@@ -204,30 +205,24 @@ LRESULT CALLBACK EditSubclass(HWND window, UINT message, WPARAM wParam,
     return result;
   }
   if (message == WM_KEYDOWN) {
-    if (reference == 2) {
-      if (wParam == L'N' && (GetKeyState(VK_CONTROL) & 0x8000) != 0) {
-        SendMessageW(GetParent(window), kMessageCommandNew, 0, 0);
-        return 0;
-      }
-      if (wParam == VK_RETURN) {
-        const WPARAM modifiers =
-            ((GetKeyState(VK_CONTROL) & 0x8000) != 0 ? 1U : 0U) |
-            ((GetKeyState(VK_SHIFT) & 0x8000) != 0 ? 2U : 0U);
-        SendMessageW(GetParent(window), kMessageCommandAccept, modifiers, 0);
-        return 0;
-      }
-      if (wParam == VK_UP || wParam == VK_DOWN) {
-        SendMessageW(GetParent(window), kMessageCommandMove, 0,
-                     wParam == VK_UP ? -1 : 1);
-        return 0;
-      }
-      if (wParam == VK_ESCAPE) {
-        SendMessageW(GetParent(window), kMessageCommandDismiss, 0, 0);
-        return 0;
-      }
-    } else if (wParam == VK_RETURN) {
-      PostMessageW(GetParent(window), kMessageNavigateAddress,
-                   static_cast<WPARAM>(reference), 0);
+    if (wParam == L'N' && (GetKeyState(VK_CONTROL) & 0x8000) != 0) {
+      SendMessageW(GetParent(window), kMessageCommandNew, 0, 0);
+      return 0;
+    }
+    if (wParam == VK_RETURN) {
+      const WPARAM modifiers =
+          ((GetKeyState(VK_CONTROL) & 0x8000) != 0 ? 1U : 0U) |
+          ((GetKeyState(VK_SHIFT) & 0x8000) != 0 ? 2U : 0U);
+      SendMessageW(GetParent(window), kMessageCommandAccept, modifiers, 0);
+      return 0;
+    }
+    if (wParam == VK_UP || wParam == VK_DOWN) {
+      SendMessageW(GetParent(window), kMessageCommandMove, 0,
+                   wParam == VK_UP ? -1 : 1);
+      return 0;
+    }
+    if (wParam == VK_ESCAPE) {
+      SendMessageW(GetParent(window), kMessageCommandDismiss, 0, 0);
       return 0;
     }
   }
@@ -532,7 +527,7 @@ void App::CreateControls() {
       searchEdit_, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN,
       MAKELPARAM(MulDiv(8, static_cast<int>(dpi_), USER_DEFAULT_SCREEN_DPI),
                  MulDiv(6, static_cast<int>(dpi_), USER_DEFAULT_SCREEN_DPI)));
-  SetWindowSubclass(searchEdit_, EditSubclass, 1, 2);
+  SetWindowSubclass(searchEdit_, SearchEditSubclass, 1, 0);
   toolbar_[6] = CreateWindowExW(
       0, L"BUTTON", L"実行", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
       0, 0, 10, 10, window_, reinterpret_cast<HMENU>(IdSearch), instance_,
@@ -599,8 +594,12 @@ void App::CreatePaneControls(int paneIndex) {
       reinterpret_cast<HMENU>(paneIndex == 0 ? IdLeftAddress : IdRightAddress),
       instance_, nullptr);
   SendMessageW(address, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
-  SetWindowSubclass(address, EditSubclass, 1,
-                    static_cast<DWORD_PTR>(paneIndex));
+  SendMessageW(address, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN,
+               MAKELPARAM(MulDiv(6, static_cast<int>(dpi_),
+                                 USER_DEFAULT_SCREEN_DPI),
+                          MulDiv(6, static_cast<int>(dpi_),
+                                 USER_DEFAULT_SCREEN_DPI)));
+  AttachAddressBar(address, paneIndex);
 
   const HWND list = CreateWindowExW(
       WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"",
@@ -785,6 +784,13 @@ void App::ApplyDpi(UINT dpi) {
       searchEdit_, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN,
       MAKELPARAM(MulDiv(8, static_cast<int>(dpi_), USER_DEFAULT_SCREEN_DPI),
                  MulDiv(6, static_cast<int>(dpi_), USER_DEFAULT_SCREEN_DPI)));
+  for (int pane = 0; pane < 2; ++pane) {
+    SendMessageW(
+        paneController_.AddressHandle(pane), EM_SETMARGINS,
+        EC_LEFTMARGIN | EC_RIGHTMARGIN,
+        MAKELPARAM(MulDiv(6, static_cast<int>(dpi_), USER_DEFAULT_SCREEN_DPI),
+                   MulDiv(6, static_cast<int>(dpi_), USER_DEFAULT_SCREEN_DPI)));
+  }
   const std::array<int, 3> columnWidths{300, 100, 140};
   for (int pane = 0; pane < 2; ++pane) {
     for (int column = 0; column < static_cast<int>(columnWidths.size());
@@ -1957,6 +1963,24 @@ bool App::HandleAppMessage(UINT message, WPARAM wParam, LPARAM lParam,
       paneController_.ShowDrives(window_, pane, true, notify, searchState);
     } else {
       NavigatePane(pane, text);
+    }
+    result = 0;
+    return true;
+  }
+  case kMessageNavigateBreadcrumb: {
+    const int pane = static_cast<int>(wParam);
+    const auto *path = reinterpret_cast<const std::wstring *>(lParam);
+    if (pane < 0 || pane > 1 || path == nullptr) {
+      result = 0;
+      return true;
+    }
+    commandController_.HideCommandSuggestions(commandSuggestions_);
+    activePane_ = pane;
+    UpdateActivePaneVisuals();
+    if (path->empty()) {
+      paneController_.ShowDrives(window_, pane, true, notify, searchState);
+    } else {
+      NavigatePane(pane, *path);
     }
     result = 0;
     return true;
