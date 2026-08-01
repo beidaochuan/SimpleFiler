@@ -95,12 +95,14 @@ private:
     std::vector<std::wstring> history;
     std::size_t historyIndex = 0;
     std::vector<FileItem> items;
+    std::wstring pendingSelectionPath;
     std::uint64_t generation = 0;
     std::unique_ptr<std::jthread> worker;
     std::vector<RetiredWorker> retiredWorkers;
   };
 
   [[nodiscard]] static bool IsValidPane(int pane) noexcept;
+  void RestorePendingSelection(int pane);
   void SortPane(int pane);
   void RetireWorker(Pane &pane);
   void FinishWorker(Pane &pane, std::uint64_t generation);
