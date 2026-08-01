@@ -70,9 +70,9 @@ std::vector<BreadcrumbLayout> CalculateLayout(HWND window, HDC dc) {
   GetClientRect(window, &client);
   const int inset = Scale(window, 3);
   const int padding = Scale(window, 6);
-  const int separatorGap = Scale(window, 3);
-  const int separatorWidth = TextWidth(dc, L"›") + separatorGap * 2;
-  const int available = std::max(0, client.right - client.left - inset * 2);
+  const int separatorWidth = Scale(window, 16);
+  const int clientWidth = static_cast<int>(client.right - client.left);
+  const int available = std::max(0, clientWidth - inset * 2);
 
   std::vector<int> buttonWidths;
   buttonWidths.reserve(breadcrumbs.size());
@@ -125,11 +125,12 @@ std::vector<BreadcrumbLayout> CalculateLayout(HWND window, HDC dc) {
         breadcrumb != kOverflowBreadcrumb &&
         breadcrumb + 1 == breadcrumbs.size();
     if (separator) {
-      entry.separator = {left + separatorGap,
+      entry.separator = {left + separatorWidth / 2,
                          (client.top + client.bottom) / 2};
       left += separatorWidth;
     }
-    const int remaining = std::max(0, client.right - inset - left);
+    const int remaining =
+        std::max(0, static_cast<int>(client.right) - inset - left);
     const int width = std::min(requestedWidth, remaining);
     entry.button = {left, client.top + Scale(window, 2), left + width,
                     client.bottom - Scale(window, 2)};
@@ -191,19 +192,23 @@ void PaintBreadcrumbs(HWND window, AddressBarState &state) {
   const HGDIOBJ oldFont = font != nullptr ? SelectObject(dc, font) : nullptr;
   SetBkMode(dc, TRANSPARENT);
   const std::vector<BreadcrumbLayout> layout = CalculateLayout(window, dc);
+  HPEN separatorPen =
+      CreatePen(PS_SOLID, std::max(1, Scale(window, 2)), kMutedTextColor);
+  const HGDIOBJ previousPen = SelectObject(dc, separatorPen);
 
   for (std::size_t index = 0; index < layout.size(); ++index) {
     const BreadcrumbLayout &entry = layout[index];
     if (entry.drawSeparator) {
-      SetTextColor(dc, kMutedTextColor);
-      RECT separatorRect{
-          entry.separator.x,
-          client.top,
-          entry.button.left,
-          client.bottom,
+      const int halfWidth = Scale(window, 2);
+      const int halfHeight = Scale(window, 4);
+      const POINT points[]{
+          {entry.separator.x - halfWidth,
+           entry.separator.y - halfHeight},
+          {entry.separator.x + halfWidth, entry.separator.y},
+          {entry.separator.x - halfWidth,
+           entry.separator.y + halfHeight},
       };
-      DrawTextW(dc, L"›", 1, &separatorRect,
-                DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+      Polyline(dc, points, static_cast<int>(std::size(points)));
     }
 
     const bool hovered = state.hover == static_cast<int>(index);
@@ -228,6 +233,8 @@ void PaintBreadcrumbs(HWND window, AddressBarState &state) {
                              DT_END_ELLIPSIS | DT_NOPREFIX);
   }
 
+  SelectObject(dc, previousPen);
+  DeleteObject(separatorPen);
   if (oldFont != nullptr)
     SelectObject(dc, oldFont);
   EndPaint(window, &paint);

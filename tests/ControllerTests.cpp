@@ -250,9 +250,9 @@ void TestPaneController(const TestControls &controls) {
 void TestAddressBar(const TestControls &controls) {
   breadcrumbPane = -1;
   breadcrumbTarget = L"<unset>";
-  SetWindowTextW(controls.Edit(), LR"(D:\home\ngrcu)");
+  SetWindowTextW(controls.Edit(), LR"(D:\)");
   sf::win::AttachAddressBar(controls.Edit(), 1);
-  SetFocus(controls.List());
+  SetFocus(nullptr);
 
   SendMessageW(controls.Edit(), WM_LBUTTONDOWN, MK_LBUTTON,
                MAKELPARAM(8, 12));
