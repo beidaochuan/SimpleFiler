@@ -1863,6 +1863,9 @@ LRESULT App::HandleNotify(LPARAM lParam) {
   } else if (header->code == LVN_COLUMNCLICK) {
     const auto *click = reinterpret_cast<NMLISTVIEW *>(lParam);
     paneController_.HandleColumnClick(paneIndex, click->iSubItem);
+  } else if (header->code == LVN_ODFINDITEMW) {
+    const auto *find = reinterpret_cast<NMLVFINDITEMW *>(lParam);
+    return paneController_.FindItem(paneIndex, *find);
   } else if (header->code == LVN_GETDISPINFOW) {
     auto *display = reinterpret_cast<NMLVDISPINFOW *>(lParam);
     paneController_.PopulateDisplayInfo(paneIndex, *display);

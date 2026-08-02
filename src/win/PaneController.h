@@ -63,6 +63,7 @@ public:
   void BeginRename(int pane) const;
   void SelectContextItem(int pane, int item) const;
   void HandleColumnClick(int pane, int subItem);
+  [[nodiscard]] int FindItem(int pane, const NMLVFINDITEMW &find) const;
   void PopulateDisplayInfo(int pane, NMLVDISPINFOW &display) const;
 
   [[nodiscard]] std::vector<std::wstring> SelectedPaths(int pane) const;

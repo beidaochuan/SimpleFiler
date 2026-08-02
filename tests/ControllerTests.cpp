@@ -18,6 +18,7 @@
 
 #include <atomic>
 #include <iostream>
+#include <memory>
 #include <string>
 #include <thread>
 #include <utility>
@@ -245,6 +246,31 @@ void TestPaneController(const TestControls &controls) {
   controller.WriteSettings(0, output);
   Check(output.sortColumn == 2 && !output.sortAscending && output.showHidden,
         "Pane settings should round-trip through the controller");
+
+  auto batch = std::make_unique<sf::win::EnumerationBatch>();
+  batch->items = {{L"C:\\Alpha.txt", L"Alpha.txt"},
+                  {L"C:\\alpine.txt", L"alpine.txt"},
+                  {L"C:\\Beta.txt", L"Beta.txt"}};
+  controller.HandleEnumerationBatch(reinterpret_cast<LPARAM>(batch.release()));
+
+  NMLVFINDITEMW find{};
+  find.iStart = 1;
+  find.lvfi.flags = LVFI_STRING | LVFI_PARTIAL;
+  find.lvfi.psz = L"ALP";
+  Check(controller.FindItem(0, find) == 1,
+        "Quick-key search should find a case-insensitive prefix");
+  find.iStart = 2;
+  find.lvfi.flags |= LVFI_WRAP;
+  Check(controller.FindItem(0, find) == 0,
+        "Quick-key search should wrap to the beginning");
+  find.iStart = 0;
+  find.lvfi.flags = LVFI_STRING;
+  find.lvfi.psz = L"beta.txt";
+  Check(controller.FindItem(0, find) == 2,
+        "Exact item lookup should remain case-insensitive");
+  find.lvfi.psz = L"missing.txt";
+  Check(controller.FindItem(0, find) == -1,
+        "Quick-key search should report a missing item");
 }
 
 void TestAddressBar(const TestControls &controls) {

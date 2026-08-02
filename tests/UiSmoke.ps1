@@ -201,6 +201,8 @@ $testRoot = Join-Path ([IO.Path]::GetTempPath()) (
 $navigationFolder = Join-Path $testRoot '00-navigation-target'
 $targetFolder = Join-Path $testRoot 'jump-target'
 $sidebarTarget = Join-Path $testRoot 'sidebar-target'
+$keyboardDecoy = Join-Path $testRoot 'zebra-decoy.txt'
+$keyboardTarget = Join-Path $testRoot 'zulu-keyboard-target.txt'
 $appPath = Join-Path $testRoot 'SimpleFiler.exe'
 $appLaunchMarker = Join-Path $testRoot 'aa-launch-marker.txt'
 $process = $null
@@ -209,6 +211,8 @@ try {
     New-Item -ItemType Directory -Path $navigationFolder | Out-Null
     New-Item -ItemType Directory -Path $targetFolder | Out-Null
     New-Item -ItemType Directory -Path $sidebarTarget | Out-Null
+    [IO.File]::WriteAllText($keyboardDecoy, '')
+    [IO.File]::WriteAllText($keyboardTarget, '')
     Copy-Item -LiteralPath $Executable -Destination $appPath
 
     $settings = @{
@@ -409,6 +413,29 @@ try {
                 [IntPtr]2).ToInt32() -eq 1
         })) {
         throw 'Down restarted at the first item after Backspace navigation'
+    }
+
+    # Incremental keyboard input should focus the first filename matching the
+    # complete prefix, not just the first item matching its initial letter.
+    [void][SimpleFilerNativeMethods]::PostMessage(
+        $leftList, 0x0102, [IntPtr][char]'z', [IntPtr]::Zero)
+    [void][SimpleFilerNativeMethods]::PostMessage(
+        $leftList, 0x0102, [IntPtr][char]'u', [IntPtr]::Zero)
+    if (!(Wait-Until -Condition {
+            $itemCount = [SimpleFilerNativeMethods]::SendMessage(
+                $leftList, 0x1004, [IntPtr]::Zero,
+                [IntPtr]::Zero).ToInt32()
+            $selected = [SimpleFilerNativeMethods]::SendMessage(
+                $leftList, 0x100C, [IntPtr](-1),
+                [IntPtr]2).ToInt32()
+            $focused = [SimpleFilerNativeMethods]::SendMessage(
+                $leftList, 0x100C, [IntPtr](-1),
+                [IntPtr]1).ToInt32()
+            $itemCount -gt 0 -and
+                $selected -eq $itemCount - 1 -and
+                $focused -eq $itemCount - 1
+        })) {
+        throw 'Incremental keyboard input did not focus the matching file'
     }
 
     # Ctrl+N goes through the hardware input queue too, so resend it while no

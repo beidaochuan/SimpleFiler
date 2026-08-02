@@ -11,6 +11,7 @@
 #include <format>
 #include <iterator>
 #include <memory>
+#include <string_view>
 #include <unordered_set>
 #include <utility>
 
@@ -392,6 +393,47 @@ void PaneController::HandleColumnClick(int paneIndex, int subItem) {
     pane.sortAscending = true;
   }
   SortPane(paneIndex);
+}
+
+int PaneController::FindItem(int paneIndex, const NMLVFINDITEMW &find) const {
+  if (!IsValidPane(paneIndex) || find.lvfi.psz == nullptr ||
+      (find.lvfi.flags & LVFI_NEARESTXY) != 0) {
+    return -1;
+  }
+  const Pane &pane = panes_[paneIndex];
+  const int itemCount = static_cast<int>(pane.items.size());
+  if (itemCount == 0)
+    return -1;
+
+  const std::wstring_view query(find.lvfi.psz);
+  if (query.empty())
+    return -1;
+  const bool partial =
+      (find.lvfi.flags & (LVFI_PARTIAL | LVFI_SUBSTRING)) != 0;
+  const auto matches = [&query, partial](const FileItem &item) {
+    if ((!partial && item.name.size() != query.size()) ||
+        (partial && item.name.size() < query.size())) {
+      return false;
+    }
+    return CompareStringOrdinal(
+               item.name.data(), static_cast<int>(partial ? query.size()
+                                                          : item.name.size()),
+               query.data(), static_cast<int>(query.size()), TRUE) ==
+           CSTR_EQUAL;
+  };
+  const auto findInRange = [&pane, &matches](int begin, int end) {
+    for (int index = begin; index < end; ++index) {
+      if (matches(pane.items[index]))
+        return index;
+    }
+    return -1;
+  };
+
+  const int start = std::clamp(find.iStart, 0, itemCount);
+  const int found = findInRange(start, itemCount);
+  if (found >= 0 || (find.lvfi.flags & LVFI_WRAP) == 0 || start == 0)
+    return found;
+  return findInRange(0, start);
 }
 
 void PaneController::PopulateDisplayInfo(int paneIndex,
