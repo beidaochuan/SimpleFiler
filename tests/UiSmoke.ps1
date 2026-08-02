@@ -714,15 +714,15 @@ try {
         throw 'Delete was not handled as text editing in the command field'
     }
 
-    # Activate the second bookmark through the sidebar double-click route.
+    # Activate the second bookmark through the sidebar single-click route.
     $selectedSidebarItem = [SimpleFilerNativeMethods]::SendMessage(
         $sidebar, 0x0186, [IntPtr]1, [IntPtr]::Zero).ToInt32()
     if ($selectedSidebarItem -ne 1) {
         throw 'Could not select the sidebar bookmark'
     }
-    $sidebarDoubleClickCommand = 220 -bor (2 -shl 16)
+    $sidebarSingleClickCommand = 220 -bor (1 -shl 16)
     [void][SimpleFilerNativeMethods]::SendMessage(
-        $mainWindow, 0x0111, [IntPtr]$sidebarDoubleClickCommand, $sidebar)
+        $mainWindow, 0x0111, [IntPtr]$sidebarSingleClickCommand, $sidebar)
     if (!(Wait-Until -Condition {
             $addressText.Clear() | Out-Null
             [void][SimpleFilerNativeMethods]::SendMessageGetText(

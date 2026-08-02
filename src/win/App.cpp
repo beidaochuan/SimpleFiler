@@ -1515,7 +1515,7 @@ LRESULT App::HandleCommand(WPARAM wParam, LPARAM) {
       IdShellMenuFirst, IdShellMenuLast};
 
   const int command = LOWORD(wParam);
-  if (HIWORD(wParam) == LBN_DBLCLK && command == IdSidebar) {
+  if (HIWORD(wParam) == LBN_SELCHANGE && command == IdSidebar) {
     sidebarController_.ActivateSidebarItem(
         window_, sidebar_, settings_, false,
         [this](const std::wstring &path) { NavigatePane(activePane_, path); },
