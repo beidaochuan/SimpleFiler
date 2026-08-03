@@ -26,7 +26,6 @@
 namespace sf::win {
 namespace {
 
-constexpr wchar_t kWindowClass[] = L"SimpleFiler.MainWindow";
 constexpr wchar_t kPromptClass[] = L"SimpleFiler.PromptWindow";
 constexpr wchar_t kCommandCueText[] =
     L"コマンド / 検索  (ff フォルダー・aa アプリ・cmd 端末)";
@@ -447,7 +446,7 @@ bool App::RegisterClasses() {
   if (mainClass.hIcon == nullptr)
     mainClass.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
   mainClass.hbrBackground = nullptr;
-  mainClass.lpszClassName = kWindowClass;
+  mainClass.lpszClassName = kMainWindowClass;
   if (!RegisterClassExW(&mainClass) &&
       GetLastError() != ERROR_CLASS_ALREADY_EXISTS) {
     return false;
@@ -474,7 +473,7 @@ bool App::CreateMainWindow(int showCommand) {
   const int x = settings_.windowX < 0 ? CW_USEDEFAULT : settings_.windowX;
   const int y = settings_.windowY < 0 ? CW_USEDEFAULT : settings_.windowY;
   window_ = CreateWindowExW(
-      0, kWindowClass, L"SimpleFiler — 2ペイン ファイルマネージャー",
+      0, kMainWindowClass, L"SimpleFiler — 2ペイン ファイルマネージャー",
       WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, x, y, settings_.windowWidth,
       settings_.windowHeight, nullptr, nullptr, instance_, this);
   if (window_ == nullptr)
@@ -879,6 +878,30 @@ void App::InitializeFromSettings(const std::wstring &initialPath) {
   SetFocus(paneController_.ListHandle(0));
   if (!fileToOpen.empty() && !OpenPath(window_, fileToOpen))
     Notify(L"指定されたファイルを開けません", true);
+}
+
+void App::OpenExternalPath(const std::wstring &path) {
+  if (IsIconic(window_))
+    ShowWindow(window_, SW_RESTORE);
+  SetForegroundWindow(window_);
+  if (path.empty())
+    return;
+  std::wstring target = path;
+  std::error_code pathError;
+  if (std::filesystem::is_regular_file(target, pathError)) {
+    const std::wstring parent =
+        std::filesystem::path(target).parent_path().wstring();
+    if (!parent.empty() && IsDirectory(parent))
+      NavigatePane(activePane_, parent);
+    if (!OpenPath(window_, target))
+      Notify(L"指定されたファイルを開けません", true);
+    return;
+  }
+  if (IsDirectory(target)) {
+    NavigatePane(activePane_, target);
+    return;
+  }
+  Notify(L"指定されたパスが見つかりません", true);
 }
 
 void App::VerifySettingsWritable() {
@@ -1465,6 +1488,19 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
       return 0;
     }
     break;
+  case WM_COPYDATA: {
+    const auto *copyData = reinterpret_cast<const COPYDATASTRUCT *>(lParam);
+    if (copyData != nullptr && copyData->dwData == kOpenPathCopyDataId) {
+      std::wstring path;
+      if (copyData->lpData != nullptr && copyData->cbData > 0) {
+        path.assign(static_cast<const wchar_t *>(copyData->lpData),
+                    copyData->cbData / sizeof(wchar_t));
+      }
+      OpenExternalPath(path);
+      return TRUE;
+    }
+    return FALSE;
+  }
   case WM_CLOSE:
     if (fileOperationController_.PendingOperationCount() +
             zipController_.PendingOperationCount() >

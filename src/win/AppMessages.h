@@ -4,6 +4,11 @@
 
 namespace sf::win {
 
+inline constexpr wchar_t kMainWindowClass[] = L"SimpleFiler.MainWindow";
+// dwData tag used to identify a WM_COPYDATA path request from another
+// SimpleFiler process enforcing single-instance behavior.
+inline constexpr ULONG_PTR kOpenPathCopyDataId = 0x53464F50; // "SFOP"
+
 inline constexpr UINT kMessageEnumerationBatch = WM_APP + 1;
 inline constexpr UINT kMessageEnumerationDone = WM_APP + 2;
 inline constexpr UINT kMessageOperationDone = WM_APP + 3;

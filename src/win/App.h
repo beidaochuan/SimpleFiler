@@ -23,6 +23,7 @@ public:
   ~App();
 
   int Run(int showCommand, const std::wstring &initialPath);
+  void OpenExternalPath(const std::wstring &path);
 
 private:
   static LRESULT CALLBACK WindowProcedure(HWND window, UINT message,
