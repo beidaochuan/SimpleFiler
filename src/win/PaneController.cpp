@@ -363,6 +363,13 @@ void PaneController::BeginRename(int paneIndex) const {
     ListView_EditLabel(pane.list, index);
 }
 
+void PaneController::SelectAll(int paneIndex) const {
+  if (!IsValidPane(paneIndex))
+    return;
+  ListView_SetItemState(panes_[paneIndex].list, -1, LVIS_SELECTED,
+                        LVIS_SELECTED);
+}
+
 void PaneController::SelectContextItem(int paneIndex, int item) const {
   if (!IsValidPane(paneIndex))
     return;
@@ -496,6 +503,30 @@ std::wstring PaneController::ItemPath(int pane, int item) const {
     return {};
   }
   return panes_[pane].items[item].path;
+}
+
+void PaneController::SetCutPaths(std::vector<std::wstring> paths) {
+  cutPaths_ = std::move(paths);
+  for (const Pane &pane : panes_)
+    InvalidateRect(pane.list, nullptr, FALSE);
+}
+
+void PaneController::ClearCutPaths() {
+  if (cutPaths_.empty())
+    return;
+  cutPaths_.clear();
+  for (const Pane &pane : panes_)
+    InvalidateRect(pane.list, nullptr, FALSE);
+}
+
+bool PaneController::IsItemCut(int pane, int item) const {
+  if (cutPaths_.empty())
+    return false;
+  const std::wstring path = ItemPath(pane, item);
+  if (path.empty())
+    return false;
+  return std::find(cutPaths_.begin(), cutPaths_.end(), path) !=
+         cutPaths_.end();
 }
 
 bool PaneController::IsSearchMode(int pane) const {

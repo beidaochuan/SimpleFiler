@@ -61,6 +61,7 @@ public:
   void OpenSelected(HWND window, int pane, const NotifyFn &notify,
                     const SearchStateFn &searchState);
   void BeginRename(int pane) const;
+  void SelectAll(int pane) const;
   void SelectContextItem(int pane, int item) const;
   void HandleColumnClick(int pane, int subItem);
   [[nodiscard]] int FindItem(int pane, const NMLVFINDITEMW &find) const;
@@ -74,6 +75,10 @@ public:
   [[nodiscard]] bool IsBusy(int pane) const;
   [[nodiscard]] bool IsDriveView(int pane) const;
   [[nodiscard]] bool HasPath(int pane) const;
+
+  void SetCutPaths(std::vector<std::wstring> paths);
+  void ClearCutPaths();
+  [[nodiscard]] bool IsItemCut(int pane, int item) const;
 
 private:
   struct Pane final {
@@ -109,6 +114,7 @@ private:
   void FinishWorker(Pane &pane, std::uint64_t generation);
 
   Pane panes_[2];
+  std::vector<std::wstring> cutPaths_;
 };
 
 } // namespace sf::win

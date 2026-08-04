@@ -19,15 +19,16 @@ public:
                                                   const std::wstring &label,
                                                   const std::wstring &initial)>;
 
-  void CopySelection(HWND window, const std::vector<std::wstring> &paths,
-                     bool cut, const NotifyFn &notify) const;
+  [[nodiscard]] bool CopySelection(HWND window,
+                                   const std::vector<std::wstring> &paths,
+                                   bool cut, const NotifyFn &notify) const;
   void TransferSelectionToOtherPane(HWND window,
                                     const std::vector<std::wstring> &paths,
                                     const std::wstring &destination,
                                     bool twoPanes, bool move,
                                     const NotifyFn &notify);
-  void Paste(HWND window, const std::wstring &destination,
-             const NotifyFn &notify);
+  [[nodiscard]] bool Paste(HWND window, const std::wstring &destination,
+                           const NotifyFn &notify);
   void DeleteSelection(HWND window, std::vector<std::wstring> paths,
                        bool permanent, const NotifyFn &notify);
   [[nodiscard]] bool RenameItem(HWND window, const std::wstring &path,

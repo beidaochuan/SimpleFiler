@@ -8,11 +8,13 @@
 
 namespace sf::win {
 
-void FileOperationController::CopySelection(
+bool FileOperationController::CopySelection(
     HWND window, const std::vector<std::wstring> &paths, bool cut,
     const NotifyFn &notify) const {
-  if (PutFilesOnClipboard(window, paths, cut))
-    notify(cut ? L"切り取りました" : L"コピーしました", false);
+  if (!PutFilesOnClipboard(window, paths, cut))
+    return false;
+  notify(cut ? L"切り取りました" : L"コピーしました", false);
+  return true;
 }
 
 void FileOperationController::TransferSelectionToOtherPane(
@@ -37,15 +39,16 @@ void FileOperationController::TransferSelectionToOtherPane(
          false);
 }
 
-void FileOperationController::Paste(HWND window,
+bool FileOperationController::Paste(HWND window,
                                     const std::wstring &destination,
                                     const NotifyFn &notify) {
   if (destination.empty())
-    return;
+    return false;
   const OperationId operationId = tasks_.NextId();
   tasks_.Track(operationId,
                PasteFilesAsync(window, operationId, destination));
   notify(L"ファイル操作を開始しました", false);
+  return true;
 }
 
 void FileOperationController::DeleteSelection(HWND window,

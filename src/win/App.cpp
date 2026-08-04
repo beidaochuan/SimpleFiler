@@ -67,6 +67,7 @@ enum ControlId : int {
   IdCopy = 300,
   IdCut,
   IdPaste,
+  IdSelectAll,
   IdDelete,
   IdPermanentDelete,
   IdRename,
@@ -182,6 +183,7 @@ struct ShortcutEntry final {
 
 constexpr ShortcutEntry kShortcutEntries[] = {
     {L"コピー／切り取り／貼り付け", L"Ctrl+C / Ctrl+X / Ctrl+V"},
+    {L"すべて選択", L"Ctrl+A"},
     {L"反対ペインへコピー／移動", L"F5 / F6"},
     {L"新しいフォルダー", L"Ctrl+N / F7"},
     {L"名前変更", L"F2"},
@@ -964,6 +966,7 @@ void App::CreateAccelerators() {
   const ACCEL values[] = {{FVIRTKEY | FCONTROL, 'C', IdCopy},
                           {FVIRTKEY | FCONTROL, 'X', IdCut},
                           {FVIRTKEY | FCONTROL, 'V', IdPaste},
+                          {FVIRTKEY | FCONTROL, 'A', IdSelectAll},
                           {FVIRTKEY, VK_DELETE, IdDelete},
                           {FVIRTKEY | FSHIFT, VK_DELETE, IdPermanentDelete},
                           {FVIRTKEY, VK_F2, IdRename},
@@ -1879,16 +1882,27 @@ LRESULT App::HandleCommand(WPARAM wParam, LPARAM) {
     }
     break;
   case IdCopy:
-    fileOperationController_.CopySelection(
-        window_, paneController_.SelectedPaths(activePane_), false, notify);
+    if (fileOperationController_.CopySelection(
+            window_, paneController_.SelectedPaths(activePane_), false,
+            notify)) {
+      paneController_.ClearCutPaths();
+    }
     break;
-  case IdCut:
-    fileOperationController_.CopySelection(
-        window_, paneController_.SelectedPaths(activePane_), true, notify);
+  case IdCut: {
+    std::vector<std::wstring> paths =
+        paneController_.SelectedPaths(activePane_);
+    if (fileOperationController_.CopySelection(window_, paths, true, notify))
+      paneController_.SetCutPaths(std::move(paths));
     break;
+  }
   case IdPaste:
-    fileOperationController_.Paste(
-        window_, paneController_.EffectivePath(activePane_), notify);
+    if (fileOperationController_.Paste(
+            window_, paneController_.EffectivePath(activePane_), notify)) {
+      paneController_.ClearCutPaths();
+    }
+    break;
+  case IdSelectAll:
+    paneController_.SelectAll(activePane_);
     break;
   case IdCopyToOther: {
     fileOperationController_.TransferSelectionToOtherPane(
@@ -2025,7 +2039,18 @@ LRESULT App::HandleNotify(LPARAM lParam) {
   if (header->hwndFrom != paneController_.ListHandle(paneIndex))
     return 0;
 
-  if (header->code == NM_SETFOCUS) {
+  if (header->code == NM_CUSTOMDRAW) {
+    auto *customDraw = reinterpret_cast<NMLVCUSTOMDRAW *>(lParam);
+    if (customDraw->nmcd.dwDrawStage == CDDS_PREPAINT)
+      return CDRF_NOTIFYITEMDRAW;
+    if (customDraw->nmcd.dwDrawStage == CDDS_ITEMPREPAINT) {
+      const int item = static_cast<int>(customDraw->nmcd.dwItemSpec);
+      if (paneController_.IsItemCut(paneIndex, item))
+        customDraw->clrText = kMutedTextColor;
+      return CDRF_DODEFAULT;
+    }
+    return CDRF_DODEFAULT;
+  } else if (header->code == NM_SETFOCUS) {
     activePane_ = paneIndex;
     UpdateActivePaneVisuals();
     const std::wstring query = paneController_.SearchQuery(activePane_);
