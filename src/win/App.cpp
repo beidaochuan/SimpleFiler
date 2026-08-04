@@ -67,7 +67,6 @@ enum ControlId : int {
   IdCopy = 300,
   IdCut,
   IdPaste,
-  IdSelectAll,
   IdDelete,
   IdPermanentDelete,
   IdRename,
@@ -96,6 +95,7 @@ enum ControlId : int {
   IdAddFolderLink,
   IdMoveSidebarUp,
   IdMoveSidebarDown,
+  IdSelectAll,
   IdPromptEdit = 400,
   // WM_SYSCOMMAND requires the low 4 bits of a custom command id to be zero.
   IdShowAbout = 416,
