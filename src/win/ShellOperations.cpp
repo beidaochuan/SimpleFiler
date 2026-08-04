@@ -281,6 +281,19 @@ bool PutFilesOnClipboard(HWND owner, const std::vector<std::wstring> &paths,
   return dropSet && effectSet;
 }
 
+bool ClearClipboard(HWND owner) {
+  if (!OpenClipboard(owner))
+    return false;
+  // Only clear the clipboard if it still holds what this window put there.
+  // Otherwise another application may have taken ownership since the cut
+  // (e.g. by copying its own data), and clearing it would destroy that.
+  const bool ownedByCaller = GetClipboardOwner() == owner;
+  if (ownedByCaller)
+    EmptyClipboard();
+  CloseClipboard();
+  return ownedByCaller;
+}
+
 std::vector<std::wstring> ReadFilesFromClipboard(bool *cut) {
   std::vector<std::wstring> paths;
   if (cut != nullptr)

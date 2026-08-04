@@ -78,6 +78,7 @@ public:
 
   void SetCutPaths(std::vector<std::wstring> paths);
   void ClearCutPaths();
+  [[nodiscard]] bool HasCutPaths() const noexcept;
   [[nodiscard]] bool IsItemCut(int pane, int item) const;
 
 private:

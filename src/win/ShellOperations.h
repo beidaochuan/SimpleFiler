@@ -37,6 +37,7 @@ ShowDuplicateConflictDialog(HWND owner, const std::wstring &fileName);
                                        const std::vector<std::wstring> &paths,
                                        bool cut);
 [[nodiscard]] std::vector<std::wstring> ReadFilesFromClipboard(bool *cut);
+[[nodiscard]] bool ClearClipboard(HWND owner);
 [[nodiscard]] std::jthread
 PasteFilesAsync(HWND notifyWindow, OperationId operationId,
                 const std::wstring &destination,

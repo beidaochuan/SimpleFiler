@@ -2094,6 +2094,12 @@ LRESULT App::HandleNotify(LPARAM lParam) {
       activePane_ = paneIndex;
       UpdateActivePaneVisuals();
       OpenPaneSelection(activePane_);
+    } else if (key->wVKey == VK_ESCAPE && paneController_.HasCutPaths()) {
+      paneController_.ClearCutPaths();
+      if (ClearClipboard(window_))
+        Notify(L"切り取りを取り消しました");
+      else
+        Notify(L"切り取りの取り消しに失敗しました", true);
     }
   } else if (header->code == LVN_COLUMNCLICK) {
     const auto *click = reinterpret_cast<NMLISTVIEW *>(lParam);

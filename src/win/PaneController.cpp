@@ -519,6 +519,8 @@ void PaneController::ClearCutPaths() {
     InvalidateRect(pane.list, nullptr, FALSE);
 }
 
+bool PaneController::HasCutPaths() const noexcept { return !cutPaths_.empty(); }
+
 bool PaneController::IsItemCut(int pane, int item) const {
   if (cutPaths_.empty())
     return false;
