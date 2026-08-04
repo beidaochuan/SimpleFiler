@@ -27,6 +27,7 @@ namespace sf::win {
 namespace {
 
 constexpr wchar_t kPromptClass[] = L"SimpleFiler.PromptWindow";
+constexpr wchar_t kShortcutsClass[] = L"SimpleFiler.ShortcutsWindow";
 constexpr wchar_t kCommandCueText[] =
     L"コマンド / 検索  (ff フォルダー・aa アプリ・cmd 端末)";
 constexpr int kToolbarHeight = 50;
@@ -97,6 +98,7 @@ enum ControlId : int {
   IdPromptEdit = 400,
   // WM_SYSCOMMAND requires the low 4 bits of a custom command id to be zero.
   IdShowAbout = 416,
+  IdShowShortcuts = 432,
   IdRegisteredAppBase = 1000,
   IdShellMenuFirst = 2000,
   IdShellMenuLast = 2999
@@ -162,6 +164,124 @@ LRESULT CALLBACK PromptProcedure(HWND window, UINT message, WPARAM wParam,
       return 0;
     }
     if (LOWORD(wParam) == IDCANCEL) {
+      DestroyWindow(window);
+      return 0;
+    }
+    break;
+  case WM_CLOSE:
+    DestroyWindow(window);
+    return 0;
+  }
+  return DefWindowProcW(window, message, wParam, lParam);
+}
+
+struct ShortcutEntry final {
+  const wchar_t *action;
+  const wchar_t *keys;
+};
+
+constexpr ShortcutEntry kShortcutEntries[] = {
+    {L"コピー／切り取り／貼り付け", L"Ctrl+C / Ctrl+X / Ctrl+V"},
+    {L"反対ペインへコピー／移動", L"F5 / F6"},
+    {L"新しいフォルダー", L"Ctrl+N / F7"},
+    {L"名前変更", L"F2"},
+    {L"ごみ箱へ削除／完全削除", L"Delete / Shift+Delete"},
+    {L"更新", L"Ctrl+R"},
+    {L"アドレスバー", L"Ctrl+L"},
+    {L"検索", L"Ctrl+F"},
+    {L"ペイン切り替え", L"Tab"},
+    {L"戻る／進む／上へ", L"Alt+← / Alt+→ / Alt+↑ または Backspace"},
+};
+
+constexpr int IdShortcutsList = 1;
+
+struct ShortcutsState final {
+  HFONT font = nullptr;
+  UINT dpi = USER_DEFAULT_SCREEN_DPI;
+  HWND list = nullptr;
+  HWND ok = nullptr;
+};
+
+void LayoutShortcutsDialog(HWND window, ShortcutsState *state) {
+  const auto scale = [state](int value) {
+    return MulDiv(value, static_cast<int>(state->dpi), USER_DEFAULT_SCREEN_DPI);
+  };
+  RECT client{};
+  GetClientRect(window, &client);
+  const int okHeight = scale(27);
+  const int okWidth = scale(82);
+  const int margin = scale(12);
+  MoveWindow(state->list, margin, margin, client.right - margin * 2,
+            client.bottom - margin * 3 - okHeight, TRUE);
+  MoveWindow(state->ok, client.right - margin - okWidth,
+            client.bottom - margin - okHeight, okWidth, okHeight, TRUE);
+}
+
+LRESULT CALLBACK ShortcutsProcedure(HWND window, UINT message, WPARAM wParam,
+                                    LPARAM lParam) {
+  auto *state = reinterpret_cast<ShortcutsState *>(
+      GetWindowLongPtrW(window, GWLP_USERDATA));
+  if (message == WM_NCCREATE) {
+    const auto *create = reinterpret_cast<CREATESTRUCTW *>(lParam);
+    state = static_cast<ShortcutsState *>(create->lpCreateParams);
+    SetWindowLongPtrW(window, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(state));
+  }
+  switch (message) {
+  case WM_CREATE: {
+    const auto scale = [state](int value) {
+      return MulDiv(value, static_cast<int>(state->dpi),
+                    USER_DEFAULT_SCREEN_DPI);
+    };
+    const HFONT font =
+        state->font != nullptr
+            ? state->font
+            : static_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
+    state->list = CreateWindowExW(
+        WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | LVS_REPORT | LVS_SINGLESEL |
+            LVS_NOSORTHEADER,
+        0, 0, 10, 10, window,
+        reinterpret_cast<HMENU>(static_cast<INT_PTR>(IdShortcutsList)),
+        nullptr, nullptr);
+    SendMessageW(state->list, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+    ListView_SetExtendedListViewStyle(state->list, LVS_EX_FULLROWSELECT);
+    SetWindowTheme(state->list, L"Explorer", nullptr);
+    const std::array<std::pair<const wchar_t *, int>, 2> columns{
+        {{L"操作", 230}, {L"キー", 260}}};
+    for (int column = 0; column < static_cast<int>(columns.size()); ++column) {
+      LVCOLUMNW value{};
+      value.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_SUBITEM;
+      value.pszText = const_cast<wchar_t *>(columns[column].first);
+      value.cx = scale(columns[column].second);
+      value.iSubItem = column;
+      ListView_InsertColumn(state->list, column, &value);
+    }
+    for (int row = 0; row < static_cast<int>(std::size(kShortcutEntries));
+        ++row) {
+      LVITEMW item{};
+      item.mask = LVIF_TEXT;
+      item.iItem = row;
+      item.iSubItem = 0;
+      item.pszText = const_cast<wchar_t *>(kShortcutEntries[row].action);
+      ListView_InsertItem(state->list, &item);
+      ListView_SetItemText(state->list, row, 1,
+                           const_cast<wchar_t *>(kShortcutEntries[row].keys));
+    }
+    state->ok = CreateWindowExW(
+        0, L"BUTTON", L"OK",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON, 0, 0, 10, 10,
+        window, reinterpret_cast<HMENU>(IDOK), nullptr, nullptr);
+    SendMessageW(state->ok, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+    LayoutShortcutsDialog(window, state);
+    SetFocus(state->ok);
+    return 0;
+  }
+  case WM_SIZE:
+    if (state != nullptr)
+      LayoutShortcutsDialog(window, state);
+    break;
+  case WM_COMMAND:
+    if (LOWORD(wParam) == IDOK || LOWORD(wParam) == IDCANCEL) {
       DestroyWindow(window);
       return 0;
     }
@@ -459,7 +579,19 @@ bool App::RegisterClasses() {
   promptClass.hCursor = LoadCursorW(nullptr, IDC_ARROW);
   promptClass.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_BTNFACE + 1);
   promptClass.lpszClassName = kPromptClass;
-  return RegisterClassExW(&promptClass) != 0 ||
+  if (!RegisterClassExW(&promptClass) &&
+      GetLastError() != ERROR_CLASS_ALREADY_EXISTS) {
+    return false;
+  }
+
+  WNDCLASSEXW shortcutsClass{};
+  shortcutsClass.cbSize = sizeof(shortcutsClass);
+  shortcutsClass.lpfnWndProc = ShortcutsProcedure;
+  shortcutsClass.hInstance = instance_;
+  shortcutsClass.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+  shortcutsClass.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_BTNFACE + 1);
+  shortcutsClass.lpszClassName = kShortcutsClass;
+  return RegisterClassExW(&shortcutsClass) != 0 ||
          GetLastError() == ERROR_CLASS_ALREADY_EXISTS;
 }
 
@@ -481,6 +613,7 @@ bool App::CreateMainWindow(int showCommand) {
   const HMENU systemMenu = GetSystemMenu(window_, FALSE);
   if (systemMenu != nullptr) {
     AppendMenuW(systemMenu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(systemMenu, MF_STRING, IdShowShortcuts, L"キーボードショートカット");
     AppendMenuW(systemMenu, MF_STRING, IdShowAbout, L"SimpleFiler について");
   }
   CreateControls();
@@ -1026,6 +1159,43 @@ void App::ShowAboutDialog() {
                                  MB_OK | MB_ICONINFORMATION);
 }
 
+void App::ShowShortcutsDialog() {
+  const HWND previousFocus = GetFocus();
+  ShortcutsState state{uiFont_, dpi_};
+  RECT owner{};
+  GetWindowRect(window_, &owner);
+  const int dialogWidth =
+      MulDiv(520, static_cast<int>(dpi_), USER_DEFAULT_SCREEN_DPI);
+  const int dialogHeight =
+      MulDiv(320, static_cast<int>(dpi_), USER_DEFAULT_SCREEN_DPI);
+  HWND dialog = CreateWindowExW(
+      WS_EX_DLGMODALFRAME, kShortcutsClass, L"キーボードショートカット",
+      WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME,
+      owner.left + (owner.right - owner.left - dialogWidth) / 2,
+      owner.top + (owner.bottom - owner.top - dialogHeight) / 2, dialogWidth,
+      dialogHeight, window_, nullptr, instance_, &state);
+  if (dialog == nullptr)
+    return;
+  EnableWindow(window_, FALSE);
+  ShowWindow(dialog, SW_SHOW);
+  MSG message{};
+  while (IsWindow(dialog) && GetMessageW(&message, nullptr, 0, 0) > 0) {
+    if (!IsDialogMessageW(dialog, &message)) {
+      TranslateMessage(&message);
+      DispatchMessageW(&message);
+    }
+  }
+  EnableWindow(window_, TRUE);
+  SetActiveWindow(window_);
+  SetForegroundWindow(window_);
+  if (previousFocus != nullptr && IsWindow(previousFocus) &&
+      (previousFocus == window_ || IsChild(window_, previousFocus))) {
+    SetFocus(previousFocus);
+  } else {
+    SetFocus(paneController_.ListHandle(activePane_));
+  }
+}
+
 void App::NavigatePane(int pane, const std::wstring &path, bool addHistory) {
   paneController_.Navigate(
       window_, pane, path, addHistory,
@@ -1373,6 +1543,10 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
   case WM_SYSCOMMAND:
     if ((wParam & 0xFFF0) == IdShowAbout) {
       ShowAboutDialog();
+      return 0;
+    }
+    if ((wParam & 0xFFF0) == IdShowShortcuts) {
+      ShowShortcutsDialog();
       return 0;
     }
     break;

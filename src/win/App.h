@@ -53,6 +53,7 @@ private:
   void AcceptCommandSuggestion(bool control, bool shift);
 
   void ShowAboutDialog();
+  void ShowShortcutsDialog();
 
   [[nodiscard]] AppArgumentContext
   BuildAppArgumentContext(bool includeSelection) const;
