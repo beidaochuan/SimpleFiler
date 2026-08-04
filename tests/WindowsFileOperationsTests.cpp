@@ -186,6 +186,84 @@ int main() {
             std::filesystem::exists(destination / L"rename-after.txt"),
         "Shell rename should change the file name");
 
+  const std::filesystem::path duplicateSource = destination / L"dup-日本語.txt";
+  check(WriteTestFile(duplicateSource, "dup"),
+        "Duplicate source should be created");
+  ResetOperation();
+  constexpr sf::win::OperationId duplicateOperationId = 5;
+  std::jthread duplicateTask = sf::win::TransferFilesAsync(
+      window, duplicateOperationId, {duplicateSource.wstring()},
+      destination.wstring(), false,
+      [](HWND, const std::wstring &) {
+        return sf::win::DuplicateConflictChoice::CopyOnce;
+      });
+  check(WaitForOperation(duplicateOperationId),
+        "Same-folder copy should complete instead of failing");
+  duplicateTask.join();
+  check(std::filesystem::exists(duplicateSource),
+        "Same-folder copy should keep the original file");
+  check(std::filesystem::exists(destination / L"dup-日本語 - コピー.txt"),
+        "Same-folder copy should create a \"- コピー\" duplicate");
+
+  ResetOperation();
+  constexpr sf::win::OperationId duplicateAgainOperationId = 6;
+  std::jthread duplicateAgainTask = sf::win::TransferFilesAsync(
+      window, duplicateAgainOperationId, {duplicateSource.wstring()},
+      destination.wstring(), false,
+      [](HWND, const std::wstring &) {
+        return sf::win::DuplicateConflictChoice::CopyOnce;
+      });
+  check(WaitForOperation(duplicateAgainOperationId),
+        "Repeated same-folder copy should complete");
+  duplicateAgainTask.join();
+  check(std::filesystem::exists(destination / L"dup-日本語 - コピー (2).txt"),
+        "Repeated same-folder copy should number the next duplicate");
+
+  const std::filesystem::path applyAllSource =
+      destination / L"apply-all.txt";
+  check(WriteTestFile(applyAllSource, "apply-all"),
+        "Apply-all source should be created");
+  ResetOperation();
+  int confirmCalls = 0;
+  constexpr sf::win::OperationId applyAllOperationId = 7;
+  std::jthread applyAllTask = sf::win::TransferFilesAsync(
+      window, applyAllOperationId,
+      {applyAllSource.wstring(), applyAllSource.wstring()},
+      destination.wstring(), false,
+      [&confirmCalls](HWND, const std::wstring &) {
+        ++confirmCalls;
+        return sf::win::DuplicateConflictChoice::ApplyToAll;
+      });
+  check(WaitForOperation(applyAllOperationId),
+        "Same-folder copy batch with ApplyToAll should complete");
+  applyAllTask.join();
+  check(confirmCalls == 1,
+        "ApplyToAll should suppress the prompt for the rest of the batch");
+  check(std::filesystem::exists(destination / L"apply-all - コピー.txt") &&
+            std::filesystem::exists(
+                destination / L"apply-all - コピー (2).txt"),
+        "ApplyToAll should duplicate every same-folder item in the batch");
+
+  const std::filesystem::path cancelSource = destination / L"cancel.txt";
+  check(WriteTestFile(cancelSource, "cancel"),
+        "Cancel source should be created");
+  ResetOperation();
+  constexpr sf::win::OperationId cancelOperationId = 8;
+  std::jthread cancelTask = sf::win::TransferFilesAsync(
+      window, cancelOperationId, {cancelSource.wstring()},
+      destination.wstring(), false,
+      [](HWND, const std::wstring &) {
+        return sf::win::DuplicateConflictChoice::Cancel;
+      });
+  const bool cancelled =
+      WaitForOperation(cancelOperationId) == false && operationResult &&
+      operationResult->operationId == cancelOperationId &&
+      operationResult->aborted;
+  check(cancelled, "Cancelling a same-folder conflict should abort the batch");
+  cancelTask.join();
+  check(!std::filesystem::exists(destination / L"cancel - コピー.txt"),
+        "Cancelling should not create a duplicate for the conflicting file");
+
   DestroyWindow(window);
   std::filesystem::remove_all(root, error);
   CoUninitialize();

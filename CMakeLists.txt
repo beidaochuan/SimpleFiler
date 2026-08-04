@@ -16,6 +16,7 @@ add_library(simplefiler_core
     src/core/AppArguments.cpp
     src/core/ArchivePath.cpp
     src/core/CommandQuery.cpp
+    src/core/DuplicateName.cpp
     src/core/Json.cpp
     src/core/PathBreadcrumbs.cpp
     src/core/PortablePath.cpp
@@ -175,6 +176,25 @@ if(SIMPLEFILER_BUILD_TESTS)
     add_test(
         NAME simplefiler_portable_path_tests
         COMMAND simplefiler_portable_path_tests
+    )
+    add_executable(simplefiler_duplicate_name_tests
+        tests/DuplicateNameTests.cpp
+    )
+    target_link_libraries(simplefiler_duplicate_name_tests
+        PRIVATE simplefiler_core
+    )
+    if(MSVC)
+        target_compile_options(simplefiler_duplicate_name_tests
+            PRIVATE /W4 /permissive- /utf-8
+        )
+    else()
+        target_compile_options(simplefiler_duplicate_name_tests
+            PRIVATE -Wall -Wextra -Wpedantic
+        )
+    endif()
+    add_test(
+        NAME simplefiler_duplicate_name_tests
+        COMMAND simplefiler_duplicate_name_tests
     )
     if(WIN32)
         add_executable(simplefiler_windows_file_tests

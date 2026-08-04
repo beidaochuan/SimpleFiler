@@ -1,14 +1,31 @@
 #include "win/ShellOperations.h"
 
+#include "core/DuplicateName.h"
 #include "win/AppMessages.h"
+#include "win/WinUtils.h"
 
+#include <commctrl.h>
 #include <shellapi.h>
 #include <shlobj.h>
 #include <shobjidl.h>
 
 #include <cstring>
+#include <filesystem>
 #include <memory>
 #include <thread>
+
+#if defined(_MSC_VER)
+// TaskDialogIndirect requires Common Controls v6, which is only loaded when
+// the running binary carries a matching manifest dependency. SimpleFiler.exe
+// gets this from resources/SimpleFiler.manifest, but test executables that
+// link this file do not embed a manifest, so declare the dependency here to
+// cover every binary that calls ShowDuplicateConflictDialog.
+#pragma comment(linker,                                                      \
+                "\"/manifestdependency:type='win32' "                       \
+                "name='Microsoft.Windows.Common-Controls' "                  \
+                "version='6.0.0.0' processorArchitecture='*' "               \
+                "publicKeyToken='6595b64144ccf1df' language='*'\"")
+#endif
 
 namespace sf::win {
 namespace {
@@ -66,14 +83,52 @@ IFileOperation *CreateOperation(HWND owner, bool recycle) {
   return operation;
 }
 
+// Compares two directory paths ignoring case and any trailing separator.
+bool SameDirectory(const std::wstring &left, const std::wstring &right) {
+  const auto trim = [](std::wstring value) {
+    while (value.size() > 1 &&
+           (value.back() == L'\\' || value.back() == L'/')) {
+      value.pop_back();
+    }
+    return value;
+  };
+  const std::wstring a = trim(left);
+  const std::wstring b = trim(right);
+  return CompareStringOrdinal(a.data(), static_cast<int>(a.size()), b.data(),
+                              static_cast<int>(b.size()), TRUE) == CSTR_EQUAL;
+}
+
+// Picks a unique "- コピー" name for sourcePath inside destination, avoiding
+// both names already present on disk and names already reserved earlier in
+// the same batch.
+std::wstring ResolveDuplicateName(const std::wstring &destination,
+                                  const std::wstring &sourcePath,
+                                  const std::vector<std::wstring> &reservedNames) {
+  const std::filesystem::path source(sourcePath);
+  const std::wstring originalName = source.filename().wstring();
+  const bool isDirectory = IsDirectory(sourcePath);
+  const auto nameExists = [&](const std::wstring &candidate) {
+    for (const std::wstring &used : reservedNames) {
+      if (_wcsicmp(used.c_str(), candidate.c_str()) == 0)
+        return true;
+    }
+    return PathExists((std::filesystem::path(destination) / candidate).wstring());
+  };
+  return GenerateDuplicateName(originalName, isDirectory, nameExists);
+}
+
 void RunPaste(HWND notifyWindow, DWORD notificationProcessId,
               OperationId operationId, std::wstring destination,
-              std::vector<std::wstring> paths, bool move) {
+              std::vector<std::wstring> paths, bool move,
+              ConflictConfirmFn confirmConflict) {
   const HRESULT initialize = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
   IFileOperation *operation = CreateOperation(notifyWindow, true);
   IShellItem *destinationItem = ItemFromPath(destination);
   HRESULT result =
       operation != nullptr && destinationItem != nullptr ? S_OK : E_FAIL;
+  std::vector<std::wstring> reservedNames;
+  bool applyToAllConfirmed = false;
+  bool userCancelled = false;
   if (SUCCEEDED(result)) {
     for (const std::wstring &path : paths) {
       IShellItem *source = ItemFromPath(path);
@@ -81,19 +136,43 @@ void RunPaste(HWND notifyWindow, DWORD notificationProcessId,
         result = HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND);
         break;
       }
+      std::wstring newName;
+      if (!move &&
+          SameDirectory(std::filesystem::path(path).parent_path().wstring(),
+                        destination)) {
+        DuplicateConflictChoice choice = DuplicateConflictChoice::CopyOnce;
+        if (!applyToAllConfirmed) {
+          const std::wstring fileName =
+              std::filesystem::path(path).filename().wstring();
+          choice = confirmConflict(notifyWindow, fileName);
+        }
+        if (choice == DuplicateConflictChoice::Cancel) {
+          source->Release();
+          userCancelled = true;
+          break;
+        }
+        if (choice == DuplicateConflictChoice::ApplyToAll)
+          applyToAllConfirmed = true;
+        newName = ResolveDuplicateName(destination, path, reservedNames);
+        reservedNames.push_back(newName);
+      }
       result =
           move ? operation->MoveItem(source, destinationItem, nullptr, nullptr)
-               : operation->CopyItem(source, destinationItem, nullptr, nullptr);
+               : operation->CopyItem(source, destinationItem,
+                                     newName.empty() ? nullptr : newName.c_str(),
+                                     nullptr);
       source->Release();
       if (FAILED(result))
         break;
     }
   }
-  if (SUCCEEDED(result))
+  if (!userCancelled && SUCCEEDED(result))
     result = operation->PerformOperations();
   BOOL aborted = FALSE;
   if (operation != nullptr)
     operation->GetAnyOperationsAborted(&aborted);
+  if (userCancelled)
+    aborted = TRUE;
   if (destinationItem != nullptr)
     destinationItem->Release();
   if (operation != nullptr)
@@ -105,6 +184,42 @@ void RunPaste(HWND notifyWindow, DWORD notificationProcessId,
 }
 
 } // namespace
+
+DuplicateConflictChoice ShowDuplicateConflictDialog(HWND owner,
+                                                    const std::wstring &fileName) {
+  constexpr int kCopyOnceId = 1001;
+  constexpr int kApplyToAllId = 1002;
+  TASKDIALOG_BUTTON buttons[] = {
+      {kCopyOnceId, L"コピーを作成"},
+      {kApplyToAllId, L"すべての項目に適用してコピーを作成"},
+  };
+  const std::wstring content =
+      L"「" + fileName + L"」は貼り付け先と同じフォルダーにあります。";
+  TASKDIALOGCONFIG config{};
+  config.cbSize = sizeof(config);
+  config.hwndParent = owner;
+  config.dwFlags = static_cast<TASKDIALOG_FLAGS>(TDF_USE_COMMAND_LINKS |
+                                                 TDF_ALLOW_DIALOG_CANCELLATION);
+  config.dwCommonButtons = TDCBF_CANCEL_BUTTON;
+  config.pszWindowTitle = L"SimpleFiler";
+  config.pszMainIcon = TD_INFORMATION_ICON;
+  config.pszMainInstruction = L"コピーを作成しますか?";
+  config.pszContent = content.c_str();
+  config.pButtons = buttons;
+  config.cButtons = static_cast<UINT>(std::size(buttons));
+  config.nDefaultButton = kCopyOnceId;
+  int pressedButton = IDCANCEL;
+  if (FAILED(TaskDialogIndirect(&config, &pressedButton, nullptr, nullptr)))
+    return DuplicateConflictChoice::Cancel;
+  switch (pressedButton) {
+  case kCopyOnceId:
+    return DuplicateConflictChoice::CopyOnce;
+  case kApplyToAllId:
+    return DuplicateConflictChoice::ApplyToAll;
+  default:
+    return DuplicateConflictChoice::Cancel;
+  }
+}
 
 bool PutFilesOnClipboard(HWND owner, const std::vector<std::wstring> &paths,
                          bool cut) {
@@ -199,7 +314,8 @@ std::vector<std::wstring> ReadFilesFromClipboard(bool *cut) {
 }
 
 std::jthread PasteFilesAsync(HWND notifyWindow, OperationId operationId,
-                             const std::wstring &destination) {
+                             const std::wstring &destination,
+                             ConflictConfirmFn confirmConflict) {
   const DWORD notificationProcessId = NotificationProcessId(notifyWindow);
   bool cut = false;
   std::vector<std::wstring> paths = ReadFilesFromClipboard(&cut);
@@ -209,12 +325,14 @@ std::jthread PasteFilesAsync(HWND notifyWindow, OperationId operationId,
     return {};
   }
   return std::jthread(RunPaste, notifyWindow, notificationProcessId,
-                      operationId, destination, std::move(paths), cut);
+                      operationId, destination, std::move(paths), cut,
+                      std::move(confirmConflict));
 }
 
 std::jthread TransferFilesAsync(HWND notifyWindow, OperationId operationId,
                                 std::vector<std::wstring> paths,
-                                std::wstring destination, bool move) {
+                                std::wstring destination, bool move,
+                                ConflictConfirmFn confirmConflict) {
   const DWORD notificationProcessId = NotificationProcessId(notifyWindow);
   if (paths.empty() || destination.empty()) {
     Notify(notifyWindow, notificationProcessId, operationId,
@@ -223,7 +341,7 @@ std::jthread TransferFilesAsync(HWND notifyWindow, OperationId operationId,
   }
   return std::jthread(RunPaste, notifyWindow, notificationProcessId,
                       operationId, std::move(destination), std::move(paths),
-                      move);
+                      move, std::move(confirmConflict));
 }
 
 std::jthread DeleteFilesAsync(HWND notifyWindow, OperationId operationId,

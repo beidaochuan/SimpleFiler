@@ -136,6 +136,11 @@ inline bool IsDirectory(const std::wstring &path) {
          (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
 }
 
+inline bool PathExists(const std::wstring &path) {
+  const std::wstring extended = ToExtendedPath(path);
+  return GetFileAttributesW(extended.c_str()) != INVALID_FILE_ATTRIBUTES;
+}
+
 inline bool IsUncPath(const std::wstring &path) {
   return path.size() >= 2 && path[0] == L'\\' && path[1] == L'\\';
 }
