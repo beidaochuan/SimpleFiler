@@ -335,6 +335,11 @@ LRESULT CALLBACK AddressSubclass(HWND window, UINT message, WPARAM wParam,
                    static_cast<WPARAM>(state->pane), 0);
       return 0;
     }
+    if (wParam == VK_ESCAPE) {
+      PostMessageW(GetParent(window), kMessageCancelAddress,
+                   static_cast<WPARAM>(state->pane), 0);
+      return 0;
+    }
     break;
   case WM_NCDESTROY:
     RemoveWindowSubclass(window, AddressSubclass, 1);

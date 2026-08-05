@@ -8,6 +8,7 @@
 #include "win/ShellMenuController.h"
 #include "win/SidebarController.h"
 #include "win/TerminalController.h"
+#include "win/WinUtils.h"
 #include "win/ZipController.h"
 #include "win/ZipOperations.h"
 
@@ -17,6 +18,7 @@
 #include <objbase.h>
 
 #include <atomic>
+#include <filesystem>
 #include <iostream>
 #include <memory>
 #include <string>
@@ -273,6 +275,40 @@ void TestPaneController(const TestControls &controls) {
         "Quick-key search should report a missing item");
 }
 
+void TestRestoreAddressText(const TestControls &controls) {
+  sf::win::PaneController controller;
+  controller.AttachControls(0, controls.Edit(), controls.List());
+  const auto notify = [](const std::wstring &, bool) {};
+  const auto searchState = [](int, bool, bool) {};
+
+  const std::wstring directory =
+      std::filesystem::temp_directory_path().wstring();
+  controller.Navigate(controls.Window(), 0, directory, false, notify,
+                      searchState);
+  SetWindowTextW(controls.Edit(), L"typed-but-not-navigated");
+  controller.RestoreAddressText(0);
+  Check(sf::win::GetWindowTextString(controls.Edit()) ==
+            controller.EffectivePath(0),
+        "Escape while browsing a folder should restore the actual path, "
+        "not the typed text");
+
+  controller.ShowDrives(controls.Window(), 0, false, notify, searchState);
+  SetWindowTextW(controls.Edit(), L"typed-but-not-navigated");
+  controller.RestoreAddressText(0);
+  Check(sf::win::GetWindowTextString(controls.Edit()) == L"PC",
+        "Escape while browsing drives should restore the \"PC\" label");
+
+  controller.Navigate(controls.Window(), 0, directory, false, notify,
+                      searchState);
+  controller.StartSearch(controls.Window(), 0, L"report", notify,
+                         searchState);
+  SetWindowTextW(controls.Edit(), L"typed-but-not-navigated");
+  controller.RestoreAddressText(0);
+  Check(sf::win::GetWindowTextString(controls.Edit()) ==
+            L"検索: " + directory,
+        "Escape while searching should restore the search-mode label");
+}
+
 void TestAddressBar(const TestControls &controls) {
   breadcrumbPane = -1;
   breadcrumbTarget = L"<unset>";
@@ -372,6 +408,7 @@ int main() {
   TestCommandController(controls);
   TestSidebarController(controls);
   TestPaneController(controls);
+  TestRestoreAddressText(controls);
   TestOperationControllers();
   TestTerminalAndShellMenuControllers(controls);
   TestAddressBar(controls);

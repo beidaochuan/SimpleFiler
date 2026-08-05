@@ -25,5 +25,6 @@ inline constexpr UINT kMessageRestoreFocus = WM_APP + 13;
 // Sent synchronously; lParam points to a std::wstring for the duration of
 // SendMessage.
 inline constexpr UINT kMessageNavigateBreadcrumb = WM_APP + 14;
+inline constexpr UINT kMessageCancelAddress = WM_APP + 15;
 
 } // namespace sf::win

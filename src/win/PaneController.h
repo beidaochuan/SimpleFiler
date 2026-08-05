@@ -61,6 +61,7 @@ public:
   void OpenSelected(HWND window, int pane, const NotifyFn &notify,
                     const SearchStateFn &searchState);
   void BeginRename(int pane) const;
+  void RestoreAddressText(int pane) const;
   void SelectAll(int pane) const;
   void SelectContextItem(int pane, int item) const;
   void HandleColumnClick(int pane, int subItem);
@@ -109,6 +110,7 @@ private:
   };
 
   [[nodiscard]] static bool IsValidPane(int pane) noexcept;
+  [[nodiscard]] static std::wstring AddressDisplayText(const Pane &pane);
   void RestorePendingSelection(int pane);
   void SortPane(int pane);
   void RetireWorker(Pane &pane);

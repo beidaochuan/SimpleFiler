@@ -2211,6 +2211,15 @@ bool App::HandleAppMessage(UINT message, WPARAM wParam, LPARAM lParam,
     result = 0;
     return true;
   }
+  case kMessageCancelAddress: {
+    // wParam is always the address bar that currently has focus, which the
+    // EN_SETFOCUS handler keeps in sync with activePane_.
+    const int pane = static_cast<int>(wParam);
+    paneController_.RestoreAddressText(pane);
+    SetFocus(paneController_.ListHandle(activePane_));
+    result = 0;
+    return true;
+  }
   case kMessageNavigateBreadcrumb: {
     const int pane = static_cast<int>(wParam);
     const auto *path = reinterpret_cast<const std::wstring *>(lParam);

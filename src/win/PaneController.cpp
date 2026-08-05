@@ -26,6 +26,14 @@ PaneController::~PaneController() {
   }
 }
 
+std::wstring PaneController::AddressDisplayText(const Pane &pane) {
+  if (pane.driveView)
+    return L"PC";
+  if (pane.searchMode)
+    return L"検索: " + pane.searchRoot;
+  return pane.path;
+}
+
 void PaneController::AttachControls(int pane, HWND address, HWND list) {
   if (!IsValidPane(pane))
     return;
@@ -105,7 +113,7 @@ void PaneController::Navigate(HWND window, int paneIndex,
   pane.items.clear();
   ++pane.generation;
   ListView_SetItemCountEx(pane.list, 0, LVSICF_NOSCROLL);
-  SetWindowTextW(pane.address, pane.path.c_str());
+  SetWindowTextW(pane.address, AddressDisplayText(pane).c_str());
   searchState(paneIndex, pane.searchMode, pane.busy);
   if (addHistory) {
     if (!pane.history.empty() && pane.historyIndex + 1 < pane.history.size()) {
@@ -162,7 +170,7 @@ void PaneController::ShowDrives(HWND, int paneIndex, bool addHistory,
   }
   ListView_SetItemCountEx(pane.list, static_cast<int>(pane.items.size()),
                           LVSICF_NOSCROLL);
-  SetWindowTextW(pane.address, L"PC");
+  SetWindowTextW(pane.address, AddressDisplayText(pane).c_str());
   searchState(paneIndex, pane.searchMode, pane.busy);
   if (addHistory) {
     if (!pane.history.empty() && pane.historyIndex + 1 < pane.history.size()) {
@@ -260,7 +268,7 @@ void PaneController::StartSearch(HWND window, int paneIndex,
   pane.items.clear();
   ++pane.generation;
   ListView_SetItemCountEx(pane.list, 0, LVSICF_NOSCROLL);
-  SetWindowTextW(pane.address, (L"検索: " + pane.searchRoot).c_str());
+  SetWindowTextW(pane.address, AddressDisplayText(pane).c_str());
   const std::uint64_t generation = pane.generation;
   const bool showHidden = pane.showHidden;
   pane.worker = std::make_unique<std::jthread>(
@@ -361,6 +369,13 @@ void PaneController::BeginRename(int paneIndex) const {
   const int index = ListView_GetNextItem(pane.list, -1, LVNI_SELECTED);
   if (index >= 0)
     ListView_EditLabel(pane.list, index);
+}
+
+void PaneController::RestoreAddressText(int paneIndex) const {
+  if (!IsValidPane(paneIndex))
+    return;
+  const Pane &pane = panes_[paneIndex];
+  SetWindowTextW(pane.address, AddressDisplayText(pane).c_str());
 }
 
 void PaneController::SelectAll(int paneIndex) const {
