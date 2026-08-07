@@ -73,6 +73,7 @@ if(WIN32)
     add_library(simplefiler_win
         src/win/AddressBar.cpp
         src/win/CommandController.cpp
+        src/win/DragDropController.cpp
         src/win/FileEnumerator.cpp
         src/win/FileOperationController.cpp
         src/win/PaneController.cpp

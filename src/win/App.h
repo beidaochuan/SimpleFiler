@@ -2,6 +2,7 @@
 
 #include "core/Settings.h"
 #include "win/CommandController.h"
+#include "win/DragDropController.h"
 #include "win/FileOperationController.h"
 #include "win/PaneController.h"
 #include "win/ShellMenuController.h"
@@ -96,6 +97,7 @@ private:
   bool draggingSplitter_ = false;
   bool settingsWritable_ = true;
   CommandController commandController_;
+  DragDropController dragDropController_;
   FileOperationController fileOperationController_;
   PaneController paneController_;
   SidebarController sidebarController_;

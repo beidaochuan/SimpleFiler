@@ -2088,6 +2088,28 @@ LRESULT App::HandleNotify(LPARAM lParam) {
           LaunchRegisteredApplication(id, false, true);
         });
     PostMessageW(window_, kMessageRestoreFocus, 0, 0);
+  } else if (header->code == LVN_BEGINDRAG) {
+    activePane_ = paneIndex;
+    UpdateActivePaneVisuals();
+    const auto *drag = reinterpret_cast<const NMLISTVIEW *>(lParam);
+    // Dragging an unselected item should drag just that item, matching
+    // Explorer's behavior when the user starts a drag from an unselected row.
+    if (drag->iItem >= 0 &&
+        ListView_GetItemState(header->hwndFrom, drag->iItem, LVIS_SELECTED) ==
+            0) {
+      paneController_.SelectContextItem(paneIndex, drag->iItem);
+    }
+    const std::vector<std::wstring> paths =
+        paneController_.SelectedPaths(paneIndex);
+    // The ListView holds mouse capture when LVN_BEGINDRAG fires; SHDoDragDrop
+    // needs mouse input itself, so release it first.
+    ReleaseCapture();
+    if (!paths.empty() &&
+        dragDropController_.BeginDrag(window_, paths) == DROPEFFECT_MOVE) {
+      // The drop target (e.g. Explorer with Shift held) moved the source
+      // files, so this pane's listing is now stale.
+      RefreshPaneView(activePane_);
+    }
   } else if (header->code == LVN_KEYDOWN) {
     const auto *key = reinterpret_cast<NMLVKEYDOWN *>(lParam);
     if (key->wVKey == VK_RETURN) {

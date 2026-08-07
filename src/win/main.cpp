@@ -3,6 +3,7 @@
 
 #include <commctrl.h>
 #include <objbase.h>
+#include <ole2.h>
 #include <shellapi.h>
 #include <windows.h>
 
@@ -46,7 +47,11 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
   controls.dwSize = sizeof(controls);
   controls.dwICC = ICC_LISTVIEW_CLASSES | ICC_STANDARD_CLASSES;
   InitCommonControlsEx(&controls);
-  const HRESULT initialized = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+  // CoInitializeEx alone is not sufficient for OLE drag-and-drop
+  // (SHDoDragDrop); OleInitialize is required, and it initializes COM
+  // itself (as COINIT_APARTMENTTHREADED) so no separate CoInitializeEx call
+  // is needed.
+  const HRESULT initialized = OleInitialize(nullptr);
 
   std::wstring initialPath;
   int argumentCount = 0;
@@ -70,7 +75,7 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
     for (int attempt = 0; attempt < 20; ++attempt) {
       if (ForwardToExistingInstance(initialPath)) {
         if (SUCCEEDED(initialized))
-          CoUninitialize();
+          OleUninitialize();
         return 0;
       }
       Sleep(50);
