@@ -98,6 +98,19 @@ bool SameDirectory(const std::wstring &left, const std::wstring &right) {
                               static_cast<int>(b.size()), TRUE) == CSTR_EQUAL;
 }
 
+std::vector<std::wstring> PathsFromHDrop(HDROP drop) {
+  std::vector<std::wstring> paths;
+  const UINT count = DragQueryFileW(drop, 0xFFFFFFFF, nullptr, 0);
+  for (UINT index = 0; index < count; ++index) {
+    const UINT length = DragQueryFileW(drop, index, nullptr, 0);
+    std::wstring path(static_cast<std::size_t>(length + 1), L'\0');
+    DragQueryFileW(drop, index, path.data(), length + 1);
+    path.resize(length);
+    paths.push_back(std::move(path));
+  }
+  return paths;
+}
+
 // Picks a unique "- コピー" name for sourcePath inside destination, avoiding
 // both names already present on disk and names already reserved earlier in
 // the same batch.
@@ -301,16 +314,8 @@ std::vector<std::wstring> ReadFilesFromClipboard(bool *cut) {
   if (!OpenClipboard(nullptr))
     return paths;
   const auto drop = static_cast<HDROP>(GetClipboardData(CF_HDROP));
-  if (drop != nullptr) {
-    const UINT count = DragQueryFileW(drop, 0xFFFFFFFF, nullptr, 0);
-    for (UINT index = 0; index < count; ++index) {
-      const UINT length = DragQueryFileW(drop, index, nullptr, 0);
-      std::wstring path(static_cast<std::size_t>(length + 1), L'\0');
-      DragQueryFileW(drop, index, path.data(), length + 1);
-      path.resize(length);
-      paths.push_back(std::move(path));
-    }
-  }
+  if (drop != nullptr)
+    paths = PathsFromHDrop(drop);
   const UINT effectFormat = RegisterClipboardFormatW(kPreferredDropEffect);
   if (cut != nullptr) {
     const HGLOBAL effectMemory = GetClipboardData(effectFormat);
@@ -323,6 +328,28 @@ std::vector<std::wstring> ReadFilesFromClipboard(bool *cut) {
     }
   }
   CloseClipboard();
+  return paths;
+}
+
+std::vector<std::wstring> PathsFromDataObject(IDataObject *dataObject) {
+  if (dataObject == nullptr)
+    return {};
+  FORMATETC format{CF_HDROP, nullptr, DVASPECT_CONTENT, -1, TYMED_HGLOBAL};
+  STGMEDIUM medium{};
+  if (FAILED(dataObject->GetData(&format, &medium)))
+    return {};
+  std::vector<std::wstring> paths;
+  // A non-conforming IDataObject could report success with a different
+  // tymed despite the TYMED_HGLOBAL request; guard against misreading the
+  // STGMEDIUM union as the wrong member.
+  if (medium.tymed == TYMED_HGLOBAL) {
+    if (const auto drop = static_cast<HDROP>(GlobalLock(medium.hGlobal));
+        drop != nullptr) {
+      paths = PathsFromHDrop(drop);
+      GlobalUnlock(medium.hGlobal);
+    }
+  }
+  ReleaseStgMedium(&medium);
   return paths;
 }
 

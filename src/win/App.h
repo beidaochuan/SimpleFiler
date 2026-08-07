@@ -5,6 +5,7 @@
 #include "win/DragDropController.h"
 #include "win/FileOperationController.h"
 #include "win/PaneController.h"
+#include "win/PaneDropTarget.h"
 #include "win/ShellMenuController.h"
 #include "win/SidebarController.h"
 #include "win/TerminalController.h"
@@ -92,10 +93,12 @@ private:
   RECT sidebarCardRect_{};
   RECT paneCardRects_[2]{};
   int activePane_ = 0;
+  int dragSourcePane_ = -1;
   bool twoPanes_ = true;
   bool sidebarVisible_ = true;
   bool draggingSplitter_ = false;
   bool settingsWritable_ = true;
+  PaneDropTarget *dropTargets_[2] = {};
   CommandController commandController_;
   DragDropController dragDropController_;
   FileOperationController fileOperationController_;

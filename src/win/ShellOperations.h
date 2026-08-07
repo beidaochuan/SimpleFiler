@@ -4,6 +4,8 @@
 
 #include <windows.h>
 
+#include <shobjidl.h>
+
 #include <functional>
 #include <string>
 #include <thread>
@@ -38,6 +40,11 @@ ShowDuplicateConflictDialog(HWND owner, const std::wstring &fileName);
                                        bool cut);
 [[nodiscard]] std::vector<std::wstring> ReadFilesFromClipboard(bool *cut);
 [[nodiscard]] bool ClearClipboard(HWND owner);
+// Extracts file paths from a CF_HDROP-bearing IDataObject (e.g. an OLE drag
+// payload). Returns an empty vector if the data object does not offer
+// CF_HDROP or the medium cannot be locked.
+[[nodiscard]] std::vector<std::wstring>
+PathsFromDataObject(IDataObject *dataObject);
 [[nodiscard]] std::jthread
 PasteFilesAsync(HWND notifyWindow, OperationId operationId,
                 const std::wstring &destination,

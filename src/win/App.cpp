@@ -766,6 +766,25 @@ void App::CreatePaneControls(int paneIndex) {
                  TRUE);
   }
   paneController_.AttachControls(paneIndex, address, list);
+
+  dropTargets_[paneIndex] = new PaneDropTarget(
+      paneIndex, &dragSourcePane_,
+      [this](int pane) { return paneController_.IsDriveView(pane); },
+      [this](int pane) { return paneController_.EffectivePath(pane); },
+      [this](const std::vector<std::wstring> &paths,
+             const std::wstring &destination, bool move) {
+        fileOperationController_.TransferSelectionToOtherPane(
+            window_, paths, destination, /*twoPanes=*/true, move,
+            [this](const std::wstring &message, bool error) {
+              Notify(message, error);
+            });
+      });
+  if (FAILED(RegisterDragDrop(list, dropTargets_[paneIndex]))) {
+    // Drag-and-drop onto this pane silently won't work; other functionality
+    // is unaffected, and status_ does not exist yet at this point in
+    // startup, so this is surfaced via debug output rather than Notify().
+    OutputDebugStringW(L"SimpleFiler: RegisterDragDrop failed for pane\n");
+  }
 }
 
 void App::LayoutControls(int width, int height) {
@@ -1695,6 +1714,16 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
       }
     }
     SaveSettings();
+    // Child windows (the pane ListViews) are destroyed before this window's
+    // own WM_DESTROY fires, so their drop targets must be revoked here while
+    // the HWNDs are still valid.
+    for (int pane = 0; pane < 2; ++pane) {
+      if (dropTargets_[pane] != nullptr) {
+        RevokeDragDrop(paneController_.ListHandle(pane));
+        dropTargets_[pane]->Release();
+        dropTargets_[pane] = nullptr;
+      }
+    }
     DestroyWindow(window_);
     return 0;
   case WM_DESTROY:
@@ -2104,10 +2133,14 @@ LRESULT App::HandleNotify(LPARAM lParam) {
     // The ListView holds mouse capture when LVN_BEGINDRAG fires; SHDoDragDrop
     // needs mouse input itself, so release it first.
     ReleaseCapture();
-    if (!paths.empty() &&
-        dragDropController_.BeginDrag(window_, paths) == DROPEFFECT_MOVE) {
-      // The drop target (e.g. Explorer with Shift held) moved the source
-      // files, so this pane's listing is now stale.
+    dragSourcePane_ = paneIndex;
+    const DWORD dragEffect = paths.empty()
+                                 ? DROPEFFECT_NONE
+                                 : dragDropController_.BeginDrag(window_, paths);
+    dragSourcePane_ = -1;
+    if (dragEffect == DROPEFFECT_MOVE) {
+      // The drop target (e.g. Explorer with Shift held, or the other pane)
+      // moved the source files, so this pane's listing is now stale.
       RefreshPaneView(activePane_);
     }
   } else if (header->code == LVN_KEYDOWN) {

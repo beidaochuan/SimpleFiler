@@ -5,6 +5,7 @@
 #include "win/CommandController.h"
 #include "win/FileOperationController.h"
 #include "win/PaneController.h"
+#include "win/PaneDropTarget.h"
 #include "win/ShellMenuController.h"
 #include "win/SidebarController.h"
 #include "win/TerminalController.h"
@@ -361,6 +362,26 @@ void TestOperationControllers() {
         "Unknown ZIP completions should not notify or refresh a pane");
 }
 
+void TestComputeDropEffect() {
+  constexpr DWORD kBothEffects = DROPEFFECT_COPY | DROPEFFECT_MOVE;
+  Check(sf::win::ComputeDropEffect(true, 0, kBothEffects) == DROPEFFECT_MOVE,
+        "Same volume with no modifier should default to move");
+  Check(sf::win::ComputeDropEffect(false, 0, kBothEffects) == DROPEFFECT_COPY,
+        "Different volume with no modifier should default to copy");
+  Check(sf::win::ComputeDropEffect(false, MK_SHIFT, kBothEffects) ==
+            DROPEFFECT_MOVE,
+        "Shift should force move regardless of volume");
+  Check(sf::win::ComputeDropEffect(true, MK_CONTROL, kBothEffects) ==
+            DROPEFFECT_COPY,
+        "Ctrl should force copy regardless of volume");
+  Check(sf::win::ComputeDropEffect(false, MK_SHIFT | MK_CONTROL,
+                                   kBothEffects) == DROPEFFECT_MOVE,
+        "Shift should take priority over Ctrl when both are held");
+  Check(sf::win::ComputeDropEffect(true, MK_SHIFT, DROPEFFECT_COPY) ==
+            DROPEFFECT_NONE,
+        "Computed effect not present in the offered mask should be none");
+}
+
 void TestTerminalAndShellMenuControllers(const TestControls &controls) {
   sf::win::TerminalController terminal;
   bool terminalError = false;
@@ -410,6 +431,7 @@ int main() {
   TestPaneController(controls);
   TestRestoreAddressText(controls);
   TestOperationControllers();
+  TestComputeDropEffect();
   TestTerminalAndShellMenuControllers(controls);
   TestAddressBar(controls);
 

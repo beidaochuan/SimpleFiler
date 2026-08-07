@@ -145,6 +145,19 @@ inline bool IsUncPath(const std::wstring &path) {
   return path.size() >= 2 && path[0] == L'\\' && path[1] == L'\\';
 }
 
+inline bool SameVolume(const std::wstring &pathA, const std::wstring &pathB) {
+  wchar_t volumeA[MAX_PATH]{};
+  wchar_t volumeB[MAX_PATH]{};
+  // GetVolumePathNameW's return format depends on whether the input carries
+  // the \\?\ prefix (e.g. "Q:\" vs "\\?\Q:\"), so both inputs must go
+  // through the same extension to compare equal for the same volume.
+  if (!GetVolumePathNameW(ToExtendedPath(pathA).c_str(), volumeA, MAX_PATH) ||
+      !GetVolumePathNameW(ToExtendedPath(pathB).c_str(), volumeB, MAX_PATH)) {
+    return false;
+  }
+  return CompareStringOrdinal(volumeA, -1, volumeB, -1, TRUE) == CSTR_EQUAL;
+}
+
 inline std::wstring QuoteArgument(const std::wstring &argument) {
   if (argument.find_first_of(L" \t\"") == std::wstring::npos)
     return argument;
