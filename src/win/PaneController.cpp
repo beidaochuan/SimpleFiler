@@ -89,7 +89,7 @@ void PaneController::Navigate(HWND window, int paneIndex,
   std::error_code error;
   std::filesystem::path path(inputPath);
   if (std::filesystem::is_regular_file(path, error)) {
-    if (!OpenPath(window, path.wstring()))
+    if (!OpenPath(window, path.wstring(), {}, path.parent_path().wstring()))
       notify(L"ファイルを開けません", true);
     return;
   }
@@ -358,7 +358,8 @@ void PaneController::OpenSelected(HWND window, int paneIndex,
   const FileItem &item = pane.items[index];
   if (item.IsDirectory())
     Navigate(window, paneIndex, item.path, true, notify, searchState);
-  else if (!OpenPath(window, item.path))
+  else if (!OpenPath(window, item.path, {},
+                     std::filesystem::path(item.path).parent_path().wstring()))
     notify(L"ファイルを開けません", true);
 }
 

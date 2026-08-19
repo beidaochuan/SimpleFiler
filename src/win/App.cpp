@@ -1031,7 +1031,9 @@ void App::InitializeFromSettings(const std::wstring &initialPath) {
   paneController_.Navigate(window_, 0, left, true, notify, searchState);
   paneController_.Navigate(window_, 1, right, true, notify, searchState);
   SetFocus(paneController_.ListHandle(0));
-  if (!fileToOpen.empty() && !OpenPath(window_, fileToOpen))
+  if (!fileToOpen.empty() &&
+      !OpenPath(window_, fileToOpen, {},
+                std::filesystem::path(fileToOpen).parent_path().wstring()))
     Notify(L"指定されたファイルを開けません", true);
 }
 
@@ -1048,7 +1050,7 @@ void App::OpenExternalPath(const std::wstring &path) {
         std::filesystem::path(target).parent_path().wstring();
     if (!parent.empty() && IsDirectory(parent))
       NavigatePane(activePane_, parent);
-    if (!OpenPath(window_, target))
+    if (!OpenPath(window_, target, {}, parent))
       Notify(L"指定されたファイルを開けません", true);
     return;
   }
