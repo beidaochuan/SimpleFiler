@@ -607,7 +607,7 @@ bool App::CreateMainWindow(int showCommand) {
   const int x = settings_.windowX < 0 ? CW_USEDEFAULT : settings_.windowX;
   const int y = settings_.windowY < 0 ? CW_USEDEFAULT : settings_.windowY;
   window_ = CreateWindowExW(
-      0, kMainWindowClass, L"SimpleFiler — 2ペイン ファイルマネージャー",
+      0, kMainWindowClass, L"SimpleFiler",
       WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, x, y, settings_.windowWidth,
       settings_.windowHeight, nullptr, nullptr, instance_, this);
   if (window_ == nullptr)
