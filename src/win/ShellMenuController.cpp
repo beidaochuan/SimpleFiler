@@ -1,10 +1,12 @@
 #include "win/ShellMenuController.h"
 
+#include "win/ShellMenuSite.h"
 #include "win/ShellPidlUtils.h"
 #include "win/WinUtils.h"
 
 #include <shellapi.h>
 #include <shlobj.h>
+#include <shlwapi.h>
 
 #include <array>
 
@@ -37,6 +39,16 @@ private:
 
 ShellMenuController::~ShellMenuController() {
   ClearCachedBackgroundMenu();
+  if (menuSite_ != nullptr)
+    menuSite_->Release();
+}
+
+ShellMenuSite &ShellMenuController::EnsureMenuSite(HWND window) {
+  // The controller is used with a single, long-lived main window, so the
+  // site is created once and reused rather than tracked per window.
+  if (menuSite_ == nullptr)
+    menuSite_ = new ShellMenuSite(window);
+  return *menuSite_;
 }
 
 void ShellMenuController::ShowLinkMenu(HWND window, HWND sourceButton,
@@ -97,6 +109,11 @@ void ShellMenuController::ShowBackgroundShellMenu(
       AppendFallbackBackgroundMenu(window, screenPoint, ids);
       return;
     }
+    // Verbs bridged through IExecuteCommand (e.g. "Share") resolve their
+    // owner window via the site, not via CMINVOKECOMMANDINFOEX, and do
+    // nothing silently if no site is set.
+    IUnknown_SetSite(freshContextMenu.Get(),
+                     static_cast<IShellBrowser *>(&EnsureMenuSite(window)));
     cachedBackgroundMenuFolder_ = folderPath;
     cachedBackgroundMenu_ = freshContextMenu.Detach();
     contextMenu = cachedBackgroundMenu_;
@@ -180,6 +197,11 @@ bool ShellMenuController::ShowItemShellMenu(
           reinterpret_cast<void **>(contextMenu.AddressOf())))) {
     return false;
   }
+  // Verbs bridged through IExecuteCommand (e.g. "Share") resolve their
+  // owner window via the site, not via CMINVOKECOMMANDINFOEX, and do
+  // nothing silently if no site is set.
+  IUnknown_SetSite(contextMenu.Get(),
+                   static_cast<IShellBrowser *>(&EnsureMenuSite(window)));
 
   HMENU menu = CreatePopupMenu();
   if (menu == nullptr)

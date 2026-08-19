@@ -13,6 +13,8 @@
 
 namespace sf::win {
 
+class ShellMenuSite;
+
 struct ShellMenuIds final {
   UINT addFolderLink = 0;
   UINT addFileLink = 0;
@@ -69,11 +71,13 @@ private:
                     const OpenSelectedFn &openSelected,
                     const BeginRenameFn &beginRename);
   void ClearCachedBackgroundMenu();
+  ShellMenuSite &EnsureMenuSite(HWND window);
 
   IContextMenu2 *activeShellMenu2_ = nullptr;
   IContextMenu3 *activeShellMenu3_ = nullptr;
   std::wstring cachedBackgroundMenuFolder_;
   IContextMenu *cachedBackgroundMenu_ = nullptr;
+  ShellMenuSite *menuSite_ = nullptr;
 };
 
 } // namespace sf::win

@@ -80,6 +80,7 @@ if(WIN32)
         src/win/PaneDropTarget.cpp
         src/win/SidebarController.cpp
         src/win/ShellMenuController.cpp
+        src/win/ShellMenuSite.cpp
         src/win/ShellOperations.cpp
         src/win/TerminalController.cpp
         src/win/TerminalLauncher.cpp
