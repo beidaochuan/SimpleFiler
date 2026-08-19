@@ -854,33 +854,43 @@ void App::LayoutControls(int width, int height) {
     rightWidth = width - rightLeft - gap;
   }
 
-  paneCardRects_[0] = {paneLeft, contentTop, paneLeft + leftWidth,
-                       contentBottom};
-  MoveWindow(paneController_.AddressHandle(0), paneLeft + cardInset,
+  // In two-pane mode pane 0 is always the left pane. In single-pane mode,
+  // show whichever pane is currently active instead of always pane 0.
+  const int fullPane = twoPanes_ ? 0 : activePane_;
+  const int otherPane = 1 - fullPane;
+  // fullPane may have been hidden earlier as the "other" pane while in
+  // single-pane mode with the opposite pane active, so show it explicitly.
+  ShowWindow(paneController_.AddressHandle(fullPane), SW_SHOW);
+  ShowWindow(paneController_.ListHandle(fullPane), SW_SHOW);
+  paneCardRects_[fullPane] = {paneLeft, contentTop, paneLeft + leftWidth,
+                              contentBottom};
+  MoveWindow(paneController_.AddressHandle(fullPane), paneLeft + cardInset,
              contentTop + cardInset, std::max(0, leftWidth - cardInset * 2),
              addressHeight, TRUE);
   MoveWindow(
-      paneController_.ListHandle(0), paneLeft + cardInset,
+      paneController_.ListHandle(fullPane), paneLeft + cardInset,
       contentTop + cardInset + addressHeight + scale(5),
       std::max(0, leftWidth - cardInset * 2),
       std::max(0, contentHeight - addressHeight - cardInset * 2 - scale(5)),
       TRUE);
-  ShowWindow(paneController_.AddressHandle(1), twoPanes_ ? SW_SHOW : SW_HIDE);
-  ShowWindow(paneController_.ListHandle(1), twoPanes_ ? SW_SHOW : SW_HIDE);
+  ShowWindow(paneController_.AddressHandle(otherPane),
+             twoPanes_ ? SW_SHOW : SW_HIDE);
+  ShowWindow(paneController_.ListHandle(otherPane),
+             twoPanes_ ? SW_SHOW : SW_HIDE);
   if (twoPanes_) {
-    paneCardRects_[1] = {rightLeft, contentTop, rightLeft + rightWidth,
-                         contentBottom};
-    MoveWindow(paneController_.AddressHandle(1), rightLeft + cardInset,
+    paneCardRects_[otherPane] = {rightLeft, contentTop, rightLeft + rightWidth,
+                                 contentBottom};
+    MoveWindow(paneController_.AddressHandle(otherPane), rightLeft + cardInset,
                contentTop + cardInset, std::max(0, rightWidth - cardInset * 2),
                addressHeight, TRUE);
     MoveWindow(
-        paneController_.ListHandle(1), rightLeft + cardInset,
+        paneController_.ListHandle(otherPane), rightLeft + cardInset,
         contentTop + cardInset + addressHeight + scale(5),
         std::max(0, rightWidth - cardInset * 2),
         std::max(0, contentHeight - addressHeight - cardInset * 2 - scale(5)),
         TRUE);
   } else {
-    paneCardRects_[1] = {};
+    paneCardRects_[otherPane] = {};
   }
   MoveWindow(status_, gap + scale(4), height - statusHeight + scale(5),
              std::max(0, width - gap * 2 - scale(8)), statusHeight - scale(5),
@@ -1810,8 +1820,6 @@ LRESULT App::HandleCommand(WPARAM wParam, LPARAM) {
     break;
   case IdTogglePanes: {
     twoPanes_ = !twoPanes_;
-    if (!twoPanes_ && activePane_ == 1)
-      activePane_ = 0;
     UpdateActivePaneVisuals();
     RECT client{};
     GetClientRect(window_, &client);
