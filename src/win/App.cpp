@@ -191,6 +191,7 @@ constexpr ShortcutEntry kShortcutEntries[] = {
     {L"更新", L"Ctrl+R"},
     {L"アドレスバー", L"Ctrl+L"},
     {L"検索", L"Ctrl+F"},
+    {L"隠しファイル／フォルダーの表示切替", L"Ctrl+H"},
     {L"ペイン切り替え", L"Tab"},
     {L"戻る／進む／上へ", L"Alt+← / Alt+→ / Alt+↑ または Backspace"},
 };
@@ -1002,6 +1003,7 @@ void App::CreateAccelerators() {
                           {FVIRTKEY | FCONTROL, 'R', IdRefresh},
                           {FVIRTKEY | FCONTROL, 'L', IdFocusAddress},
                           {FVIRTKEY | FCONTROL, 'F', IdFocusSearch},
+                          {FVIRTKEY | FCONTROL, 'H', IdShowHidden},
                           {FVIRTKEY, VK_TAB, IdSwitchPane},
                           {FVIRTKEY, VK_F5, IdCopyToOther},
                           {FVIRTKEY, VK_F6, IdMoveToOther},
