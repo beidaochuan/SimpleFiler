@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(SimpleFiler VERSION 0.0.8 LANGUAGES CXX)
+project(SimpleFiler VERSION 0.0.9 LANGUAGES CXX)
 
 option(SIMPLEFILER_BUILD_TESTS "Build unit tests" ON)
 
