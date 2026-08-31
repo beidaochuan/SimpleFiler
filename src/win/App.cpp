@@ -3,6 +3,7 @@
 #include "core/AppArguments.h"
 #include "win/AddressBar.h"
 #include "win/AppMessages.h"
+#include "win/DriveInfo.h"
 #include "win/ShellOperations.h"
 #include "win/WinUtils.h"
 
@@ -33,8 +34,10 @@ constexpr wchar_t kCommandCueText[] =
 constexpr int kToolbarHeight = 50;
 constexpr int kAddressHeight = 22;
 constexpr int kStatusHeight = 30;
+constexpr int kDriveCapacityWidth = 240;
 constexpr int kSidebarWidth = 165;
 constexpr int kSplitterWidth = 10;
+constexpr UINT_PTR kDriveCapacityTimerId = 1;
 constexpr COLORREF kBackgroundColor = RGB(244, 247, 251);
 constexpr COLORREF kSurfaceColor = RGB(255, 255, 255);
 constexpr COLORREF kSidebarColor = RGB(248, 250, 252);
@@ -701,6 +704,11 @@ void App::CreateControls() {
                             WS_CHILD | WS_VISIBLE | SS_LEFT, 0, 0, 10, 10,
                             window_, nullptr, instance_, nullptr);
   SendMessageW(status_, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+  driveCapacity_ = CreateWindowExW(0, L"STATIC", L"",
+                                   WS_CHILD | WS_VISIBLE | SS_RIGHT, 0, 0, 10,
+                                   10, window_, nullptr, instance_, nullptr);
+  SendMessageW(driveCapacity_, WM_SETFONT, reinterpret_cast<WPARAM>(font),
+               TRUE);
 
   SHFILEINFOW shellInfo{};
   HIMAGELIST images = reinterpret_cast<HIMAGELIST>(SHGetFileInfoW(
@@ -716,6 +724,7 @@ void App::CreateControls() {
   LayoutControls(client.right, client.bottom);
   sidebarController_.RebuildSidebar(sidebar_, settings_);
   UpdateActivePaneVisuals();
+  SetTimer(window_, kDriveCapacityTimerId, 1500, nullptr);
 }
 
 void App::CreatePaneControls(int paneIndex) {
@@ -893,9 +902,17 @@ void App::LayoutControls(int width, int height) {
   } else {
     paneCardRects_[otherPane] = {};
   }
-  MoveWindow(status_, gap + scale(4), height - statusHeight + scale(5),
-             std::max(0, width - gap * 2 - scale(8)), statusHeight - scale(5),
-             TRUE);
+  const int driveCapacityWidth = std::max(
+      0, std::min(scale(kDriveCapacityWidth), (width - gap * 2 - scale(8)) / 3));
+  const int statusTop = height - statusHeight + scale(5);
+  const int statusRowHeight = statusHeight - scale(5);
+  MoveWindow(status_, gap + scale(4), statusTop,
+             std::max(0, width - gap * 2 - scale(8) - driveCapacityWidth),
+             statusRowHeight, TRUE);
+  MoveWindow(driveCapacity_,
+             gap + scale(4) + std::max(0, width - gap * 2 - scale(8) -
+                                               driveCapacityWidth),
+             statusTop, driveCapacityWidth, statusRowHeight, TRUE);
   // MoveWindow's own repaint only invalidates the delta between the old and
   // new rect, not the whole client area. LVS_EX_DOUBLEBUFFER caches a
   // full-client offscreen bitmap, so a partial invalidate leaves stale
@@ -977,6 +994,7 @@ void App::UpdateActivePaneVisuals() {
     InvalidateRect(paneController_.AddressHandle(index), nullptr, TRUE);
   }
   InvalidateRect(window_, nullptr, FALSE);
+  UpdateDriveCapacityDisplay();
 }
 
 void App::UpdatePaneSearchState(int pane, bool searchMode, bool busy) {
@@ -1179,6 +1197,19 @@ std::wstring App::PromptText(const std::wstring &title,
 void App::Notify(const std::wstring &message, bool error) {
   SetWindowTextW(status_,
                  (error ? L"⚠  " + message : L"●  " + message).c_str());
+}
+
+void App::UpdateDriveCapacityDisplay() {
+  // Left blank both while showing the drive list (no single drive applies)
+  // and when the query fails (unreachable drive); the two are not
+  // distinguished in the UI.
+  std::wstring text;
+  if (!paneController_.IsDriveView(activePane_)) {
+    const std::wstring path = paneController_.EffectivePath(activePane_);
+    if (const auto capacity = QueryDriveCapacity(path))
+      text = FormatDriveCapacity(*capacity);
+  }
+  SetWindowTextW(driveCapacity_, text.c_str());
 }
 
 void App::ShowAboutDialog() {
@@ -1480,7 +1511,7 @@ bool App::HandleControlColor(UINT message, WPARAM wParam, LPARAM lParam,
     return true;
   case WM_CTLCOLORSTATIC:
     SetBkMode(dc, TRANSPARENT);
-    if (control == status_) {
+    if (control == status_ || control == driveCapacity_) {
       SetTextColor(dc, kMutedTextColor);
       result = reinterpret_cast<LRESULT>(backgroundBrush_);
       return true;
@@ -1616,6 +1647,12 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
   case WM_SIZE:
     LayoutControls(LOWORD(lParam), HIWORD(lParam));
     return 0;
+  case WM_TIMER:
+    if (wParam == kDriveCapacityTimerId) {
+      UpdateDriveCapacityDisplay();
+      return 0;
+    }
+    break;
   case WM_ERASEBKGND: {
     RECT client{};
     GetClientRect(window_, &client);
@@ -1741,6 +1778,7 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
     DestroyWindow(window_);
     return 0;
   case WM_DESTROY:
+    KillTimer(window_, kDriveCapacityTimerId);
     PostQuitMessage(0);
     return 0;
   case WM_INITMENUPOPUP:

@@ -74,6 +74,7 @@ if(WIN32)
         src/win/AddressBar.cpp
         src/win/CommandController.cpp
         src/win/DragDropController.cpp
+        src/win/DriveInfo.cpp
         src/win/FileEnumerator.cpp
         src/win/FileOperationController.cpp
         src/win/PaneController.cpp
@@ -247,6 +248,28 @@ if(SIMPLEFILER_BUILD_TESTS)
         )
         set_tests_properties(
             simplefiler_file_enumerator_tests PROPERTIES TIMEOUT 120
+        )
+        add_executable(simplefiler_drive_info_tests
+            tests/DriveInfoTests.cpp
+        )
+        target_include_directories(simplefiler_drive_info_tests
+            PRIVATE src
+        )
+        target_compile_definitions(simplefiler_drive_info_tests PRIVATE
+            UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX
+            _WIN32_WINNT=0x0A00 NTDDI_VERSION=0x0A000000
+        )
+        if(MSVC)
+            target_compile_options(simplefiler_drive_info_tests
+                PRIVATE /W4 /permissive- /utf-8
+            )
+        endif()
+        target_link_libraries(simplefiler_drive_info_tests PRIVATE
+            simplefiler_win
+        )
+        add_test(
+            NAME simplefiler_drive_info_tests
+            COMMAND simplefiler_drive_info_tests
         )
         add_executable(simplefiler_controller_tests
             tests/ControllerTests.cpp

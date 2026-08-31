@@ -56,6 +56,7 @@ private:
 
   void ShowAboutDialog();
   void ShowShortcutsDialog();
+  void UpdateDriveCapacityDisplay();
 
   [[nodiscard]] AppArgumentContext
   BuildAppArgumentContext(bool includeSelection) const;
@@ -82,6 +83,7 @@ private:
   HWND sidebar_ = nullptr;
   HWND sidebarTitle_ = nullptr;
   HWND status_ = nullptr;
+  HWND driveCapacity_ = nullptr;
   HACCEL accelerators_ = nullptr;
   HBRUSH backgroundBrush_ = nullptr;
   HBRUSH surfaceBrush_ = nullptr;
