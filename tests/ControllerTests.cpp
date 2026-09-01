@@ -40,6 +40,14 @@ void Check(bool condition, const char *message) {
   }
 }
 
+void PumpPendingMessages() {
+  MSG message{};
+  while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) {
+    TranslateMessage(&message);
+    DispatchMessageW(&message);
+  }
+}
+
 LRESULT CALLBACK TestWindowProcedure(HWND window, UINT message, WPARAM wParam,
                                      LPARAM lParam) {
   if (message == sf::win::kMessageNavigateBreadcrumb) {
@@ -81,8 +89,8 @@ public:
                         window_, nullptr, windowClass.hInstance, nullptr);
     list_ = CreateWindowExW(
         0, WC_LISTVIEWW, L"",
-        WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_OWNERDATA, 200, 124, 100, 100,
-        window_, nullptr, windowClass.hInstance, nullptr);
+        WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_OWNERDATA | LVS_EDITLABELS,
+        200, 124, 100, 100, window_, nullptr, windowClass.hInstance, nullptr);
     ShowWindow(window_, SW_SHOWNOACTIVATE);
     return edit_ != nullptr && suggestions_ != nullptr && sidebar_ != nullptr &&
            list_ != nullptr;
@@ -276,6 +284,50 @@ void TestPaneController(const TestControls &controls) {
         "Quick-key search should report a missing item");
 }
 
+void TestBeginRenameForNewItem(const TestControls &controls) {
+  // Regression test for issue #17: shell32's "New" verb creates a file under
+  // its default template name and expects the host to select it and enter
+  // inline rename as soon as it shows up in the listing (matching Explorer),
+  // so the user renames it before ever opening it under the template name.
+  sf::win::PaneController controller;
+  controller.AttachControls(0, controls.Edit(), controls.List());
+
+  auto batch = std::make_unique<sf::win::EnumerationBatch>();
+  batch->items = {{L"C:\\Existing.txt", L"Existing.txt"},
+                  {L"C:\\New Microsoft Excel Worksheet.xlsx",
+                   L"New Microsoft Excel Worksheet.xlsx"}};
+  controller.HandleEnumerationBatch(reinterpret_cast<LPARAM>(batch.release()));
+
+  controller.BeginRenameForNewItem(0,
+                                   L"C:\\New Microsoft Excel Worksheet.xlsx");
+
+  const auto notify = [](const std::wstring &, bool) {};
+  const auto searchState = [](int, bool, bool) {};
+  SetFocus(controls.List());
+  auto *done = new sf::win::EnumerationDone{0, 0, ERROR_SUCCESS, 2};
+  controller.HandleEnumerationDone(reinterpret_cast<LPARAM>(done), notify,
+                                   searchState);
+  // ListView defers creating the edit box; pump the queue so it's visible
+  // below.
+  PumpPendingMessages();
+
+  Check(ListView_GetNextItem(controls.List(), -1, LVNI_SELECTED) == 1,
+        "Newly created item should be selected once its listing arrives");
+  Check(ListView_GetEditControl(controls.List()) != nullptr,
+        "Newly created item should enter inline rename mode automatically");
+  ListView_CancelEditLabel(controls.List());
+
+  // A path that never shows up in the listing (e.g. creation failed) must
+  // not leave rename-on-select armed for an unrelated future selection.
+  controller.BeginRenameForNewItem(0, L"C:\\Missing.xlsx");
+  auto *missingDone = new sf::win::EnumerationDone{0, 0, ERROR_SUCCESS, 2};
+  controller.HandleEnumerationDone(reinterpret_cast<LPARAM>(missingDone),
+                                   notify, searchState);
+  Check(ListView_GetEditControl(controls.List()) == nullptr,
+        "A pending rename for an item that never appears should not enter "
+        "rename mode");
+}
+
 void TestRestoreAddressText(const TestControls &controls) {
   sf::win::PaneController controller;
   controller.AttachControls(0, controls.Edit(), controls.List());
@@ -429,6 +481,7 @@ int main() {
   TestCommandController(controls);
   TestSidebarController(controls);
   TestPaneController(controls);
+  TestBeginRenameForNewItem(controls);
   TestRestoreAddressText(controls);
   TestOperationControllers();
   TestComputeDropEffect();

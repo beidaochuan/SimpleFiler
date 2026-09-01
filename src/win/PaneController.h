@@ -61,6 +61,7 @@ public:
   void OpenSelected(HWND window, int pane, const NotifyFn &notify,
                     const SearchStateFn &searchState);
   void BeginRename(int pane) const;
+  void BeginRenameForNewItem(int pane, const std::wstring &path);
   void RestoreAddressText(int pane) const;
   void SelectAll(int pane) const;
   void SelectContextItem(int pane, int item) const;
@@ -104,6 +105,7 @@ private:
     std::size_t historyIndex = 0;
     std::vector<FileItem> items;
     std::wstring pendingSelectionPath;
+    bool pendingRenameOnSelect = false;
     std::uint64_t generation = 0;
     std::unique_ptr<std::jthread> worker;
     std::vector<RetiredWorker> retiredWorkers;

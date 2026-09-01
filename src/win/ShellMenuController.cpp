@@ -81,7 +81,8 @@ void ShellMenuController::AppendFallbackBackgroundMenu(
 
 void ShellMenuController::ShowBackgroundShellMenu(
     HWND window, const std::wstring &folderPath, POINT screenPoint,
-    const ShellMenuIds &ids, const RefreshPaneFn &refreshPane) {
+    const ShellMenuIds &ids, const RefreshPaneFn &refreshPane,
+    const BeginRenameForPathFn &beginRenameForPath) {
   IContextMenu *contextMenu = nullptr;
   if (cachedBackgroundMenu_ != nullptr &&
       cachedBackgroundMenuFolder_ == folderPath) {
@@ -158,11 +159,24 @@ void ShellMenuController::ShowBackgroundShellMenu(
     invoke.lpVerb = MAKEINTRESOURCEA(verbOffset);
     invoke.lpVerbW = MAKEINTRESOURCEW(verbOffset);
     invoke.nShow = SW_SHOWNORMAL;
+    // If this invokes a "New > ..." item, shell32's CNewMenu asks our site
+    // for the active IShellView and calls SelectItem(..., SVSI_EDIT) on the
+    // item it just created; capture that path so we can put it into our own
+    // rename mode below, matching Explorer's behavior for newly created items.
+    std::wstring newItemPath;
+    ShellMenuSite &site = EnsureMenuSite(window);
+    site.ArmNewItemDetection(
+        folderPath, [&newItemPath](std::wstring path) {
+          newItemPath = std::move(path);
+        });
     if (FAILED(contextMenu->InvokeCommand(
             reinterpret_cast<CMINVOKECOMMANDINFO *>(&invoke)))) {
       ClearCachedBackgroundMenu();
     }
+    site.DisarmNewItemDetection();
     refreshPane();
+    if (!newItemPath.empty())
+      beginRenameForPath(newItemPath);
   }
   // Dynamically populated submenus retain state until InvokeCommand returns.
   DestroyMenu(menu);
@@ -284,13 +298,14 @@ void ShellMenuController::ShowFileMenu(
     const AppSettings &settings, const ShellMenuIds &ids,
     const RefreshPaneFn &refreshPane, const OpenSelectedFn &openSelected,
     const BeginRenameFn &beginRename,
+    const BeginRenameForPathFn &beginRenameForPath,
     const LaunchApplicationFn &launchApplication) {
   if (paths.empty()) {
     if (driveView || backgroundFolder.empty())
       AppendFallbackBackgroundMenu(window, screenPoint, ids);
     else
       ShowBackgroundShellMenu(window, backgroundFolder, screenPoint, ids,
-                              refreshPane);
+                              refreshPane, beginRenameForPath);
     return;
   }
   if (ShowItemShellMenu(window, paths, screenPoint, ids, refreshPane,

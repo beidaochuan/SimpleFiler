@@ -37,6 +37,7 @@ public:
   using RefreshPaneFn = std::function<void()>;
   using OpenSelectedFn = std::function<void()>;
   using BeginRenameFn = std::function<void()>;
+  using BeginRenameForPathFn = std::function<void(const std::wstring &path)>;
   using LaunchApplicationFn = std::function<void(const std::string &id)>;
 
   ShellMenuController() = default;
@@ -54,6 +55,7 @@ public:
                     const RefreshPaneFn &refreshPane,
                     const OpenSelectedFn &openSelected,
                     const BeginRenameFn &beginRename,
+                    const BeginRenameForPathFn &beginRenameForPath,
                     const LaunchApplicationFn &launchApplication);
   [[nodiscard]] bool HandleMenuMessage(UINT message, WPARAM wParam,
                                        LPARAM lParam, LRESULT &result) const;
@@ -63,7 +65,8 @@ private:
                                     const ShellMenuIds &ids) const;
   void ShowBackgroundShellMenu(HWND window, const std::wstring &folderPath,
                                POINT screenPoint, const ShellMenuIds &ids,
-                               const RefreshPaneFn &refreshPane);
+                               const RefreshPaneFn &refreshPane,
+                               const BeginRenameForPathFn &beginRenameForPath);
   [[nodiscard]] bool
   ShowItemShellMenu(HWND window, const std::vector<std::wstring> &paths,
                     POINT screenPoint, const ShellMenuIds &ids,

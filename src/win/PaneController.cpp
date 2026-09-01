@@ -104,6 +104,7 @@ void PaneController::Navigate(HWND window, int paneIndex,
   Pane &pane = panes_[paneIndex];
   RetireWorker(pane);
   pane.pendingSelectionPath.clear();
+  pane.pendingRenameOnSelect = false;
   pane.path = path.wstring();
   pane.searchMode = false;
   pane.searchRoot.clear();
@@ -145,6 +146,7 @@ void PaneController::ShowDrives(HWND, int paneIndex, bool addHistory,
   Pane &pane = panes_[paneIndex];
   RetireWorker(pane);
   pane.pendingSelectionPath.clear();
+  pane.pendingRenameOnSelect = false;
   pane.path.clear();
   pane.searchRoot.clear();
   pane.searchMode = false;
@@ -261,6 +263,7 @@ void PaneController::StartSearch(HWND window, int paneIndex,
   }
   RetireWorker(pane);
   pane.pendingSelectionPath.clear();
+  pane.pendingRenameOnSelect = false;
   pane.searchRoot = pane.searchMode ? pane.searchRoot : pane.path;
   pane.searchQuery = query;
   pane.searchMode = true;
@@ -370,6 +373,20 @@ void PaneController::BeginRename(int paneIndex) const {
   const int index = ListView_GetNextItem(pane.list, -1, LVNI_SELECTED);
   if (index >= 0)
     ListView_EditLabel(pane.list, index);
+}
+
+void PaneController::BeginRenameForNewItem(int paneIndex,
+                                           const std::wstring &path) {
+  if (!IsValidPane(paneIndex))
+    return;
+  // Must run after RefreshPane/Navigate has already been triggered for this
+  // pane, since Navigate clears pendingSelectionPath synchronously when it
+  // starts; the pane's listing itself finishes later on its worker thread,
+  // and RestorePendingSelection() picks this back up from
+  // HandleEnumerationDone() once the newly created item is actually there.
+  Pane &pane = panes_[paneIndex];
+  pane.pendingSelectionPath = path;
+  pane.pendingRenameOnSelect = true;
 }
 
 void PaneController::RestoreAddressText(int paneIndex) const {
@@ -579,6 +596,8 @@ void PaneController::RestorePendingSelection(int paneIndex) {
                                      pane.pendingSelectionPath.c_str()) == 0;
                    });
   pane.pendingSelectionPath.clear();
+  const bool renameOnSelect = pane.pendingRenameOnSelect;
+  pane.pendingRenameOnSelect = false;
   if (found == pane.items.end())
     return;
 
@@ -589,6 +608,8 @@ void PaneController::RestorePendingSelection(int paneIndex) {
                         LVIS_SELECTED | LVIS_FOCUSED);
   ListView_SetSelectionMark(pane.list, index);
   ListView_EnsureVisible(pane.list, index, FALSE);
+  if (renameOnSelect)
+    ListView_EditLabel(pane.list, index);
 }
 
 void PaneController::SortPane(int paneIndex) {

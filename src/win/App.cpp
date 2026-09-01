@@ -2163,6 +2163,9 @@ LRESULT App::HandleNotify(LPARAM lParam) {
         [this] { RefreshPaneView(activePane_); },
         [this] { OpenPaneSelection(activePane_); },
         [this] { paneController_.BeginRename(activePane_); },
+        [this](const std::wstring &path) {
+          paneController_.BeginRenameForNewItem(activePane_, path);
+        },
         [this](const std::string &id) {
           LaunchRegisteredApplication(id, false, true);
         });
