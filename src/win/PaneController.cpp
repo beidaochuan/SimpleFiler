@@ -117,6 +117,8 @@ void PaneController::Navigate(HWND window, int paneIndex,
   SetWindowTextW(pane.address, AddressDisplayText(pane).c_str());
   searchState(paneIndex, pane.searchMode, pane.busy);
   if (addHistory) {
+    pane.ascendedChildPath.clear();
+    pane.ascendedParentPath.clear();
     if (!pane.history.empty() && pane.historyIndex + 1 < pane.history.size()) {
       pane.history.erase(pane.history.begin() +
                              static_cast<std::ptrdiff_t>(pane.historyIndex + 1),
@@ -175,6 +177,8 @@ void PaneController::ShowDrives(HWND, int paneIndex, bool addHistory,
   SetWindowTextW(pane.address, AddressDisplayText(pane).c_str());
   searchState(paneIndex, pane.searchMode, pane.busy);
   if (addHistory) {
+    pane.ascendedChildPath.clear();
+    pane.ascendedParentPath.clear();
     if (!pane.history.empty() && pane.historyIndex + 1 < pane.history.size()) {
       pane.history.erase(pane.history.begin() +
                              static_cast<std::ptrdiff_t>(pane.historyIndex + 1),
@@ -229,6 +233,21 @@ void PaneController::NavigateUp(HWND window, int paneIndex,
     Navigate(window, paneIndex, parent.wstring(), true, notify, searchState);
     pane.pendingSelectionPath = childPath;
   }
+  pane.ascendedChildPath = childPath;
+  pane.ascendedParentPath = pane.path;
+}
+
+void PaneController::NavigateDown(HWND window, int paneIndex,
+                                  const NotifyFn &notify,
+                                  const SearchStateFn &searchState) {
+  if (!IsValidPane(paneIndex))
+    return;
+  Pane &pane = panes_[paneIndex];
+  if (pane.ascendedChildPath.empty() ||
+      _wcsicmp(pane.path.c_str(), pane.ascendedParentPath.c_str()) != 0)
+    return;
+  Navigate(window, paneIndex, pane.ascendedChildPath, true, notify,
+           searchState);
 }
 
 void PaneController::RefreshPane(HWND window, int paneIndex,

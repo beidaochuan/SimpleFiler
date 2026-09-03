@@ -45,6 +45,8 @@ public:
                        const SearchStateFn &searchState);
   void NavigateUp(HWND window, int pane, const NotifyFn &notify,
                   const SearchStateFn &searchState);
+  void NavigateDown(HWND window, int pane, const NotifyFn &notify,
+                    const SearchStateFn &searchState);
   void RefreshPane(HWND window, int pane, const NotifyFn &notify,
                    const SearchStateFn &searchState);
   void StartSearch(HWND window, int pane, const std::wstring &query,
@@ -103,6 +105,8 @@ private:
     bool sortAscending = true;
     std::vector<std::wstring> history;
     std::size_t historyIndex = 0;
+    std::wstring ascendedChildPath;
+    std::wstring ascendedParentPath;
     std::vector<FileItem> items;
     std::wstring pendingSelectionPath;
     bool pendingRenameOnSelect = false;
