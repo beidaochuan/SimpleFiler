@@ -1722,6 +1722,21 @@ LRESULT App::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
   }
   case WM_COMMAND:
     return HandleCommand(wParam, lParam);
+  case WM_APPCOMMAND: {
+    // マウスの戻る/進むボタン(XBUTTON1/2)は WM_APPCOMMAND として届く。
+    // HIWORD は 0(アクセラレータ経由の呼び出しは 1)だが、
+    // HandleCommand は IdBack/IdForward でその値を参照しないため無害。
+    const short appCommand = GET_APPCOMMAND_LPARAM(lParam);
+    if (appCommand == APPCOMMAND_BROWSER_BACKWARD) {
+      HandleCommand(MAKEWPARAM(IdBack, 0), 0);
+      return TRUE;
+    }
+    if (appCommand == APPCOMMAND_BROWSER_FORWARD) {
+      HandleCommand(MAKEWPARAM(IdForward, 0), 0);
+      return TRUE;
+    }
+    break;
+  }
   case WM_NOTIFY:
     return HandleNotify(lParam);
   case WM_CONTEXTMENU:
