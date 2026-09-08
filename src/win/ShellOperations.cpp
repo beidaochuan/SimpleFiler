@@ -5,14 +5,17 @@
 #include "win/WinUtils.h"
 
 #include <commctrl.h>
+#include <ole2.h>
 #include <shellapi.h>
 #include <shlobj.h>
 #include <shobjidl.h>
 
 #include <cstring>
+#include <cwchar>
 #include <filesystem>
 #include <memory>
 #include <thread>
+#include <vector>
 
 #if defined(_MSC_VER)
 // TaskDialogIndirect requires Common Controls v6, which is only loaded when
@@ -196,6 +199,232 @@ void RunPaste(HWND notifyWindow, DWORD notificationProcessId,
          aborted != FALSE);
 }
 
+UINT FileDescriptorClipboardFormat() {
+  static const UINT format = RegisterClipboardFormatW(CFSTR_FILEDESCRIPTORW);
+  return format;
+}
+
+UINT FileContentsClipboardFormat() {
+  static const UINT format = RegisterClipboardFormatW(CFSTR_FILECONTENTS);
+  return format;
+}
+
+// One entry from a CFSTR_FILEDESCRIPTORW group, as offered by e.g. Remote
+// Desktop's clipboard redirection when copying files from the remote
+// session. relativePath may contain subfolders when a whole directory tree
+// was copied.
+struct VirtualFileEntry {
+  std::wstring relativePath;
+  bool isDirectory = false;
+};
+
+bool ReadVirtualFileDescriptors(IDataObject *dataObject,
+                                std::vector<VirtualFileEntry> &entries) {
+  FORMATETC format{static_cast<CLIPFORMAT>(FileDescriptorClipboardFormat()),
+                   nullptr, DVASPECT_CONTENT, -1, TYMED_HGLOBAL};
+  STGMEDIUM medium{};
+  if (FAILED(dataObject->GetData(&format, &medium)))
+    return false;
+  bool ok = false;
+  if (medium.tymed == TYMED_HGLOBAL) {
+    if (const auto *group = static_cast<const FILEGROUPDESCRIPTORW *>(
+            GlobalLock(medium.hGlobal))) {
+      for (UINT index = 0; index < group->cItems; ++index) {
+        const FILEDESCRIPTORW &descriptor = group->fgd[index];
+        const bool isDirectory =
+            (descriptor.dwFlags & FD_ATTRIBUTES) != 0 &&
+            (descriptor.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+        // cFileName is a fixed WCHAR[MAX_PATH] buffer from an untrusted
+        // clipboard source; bound the length explicitly rather than trust
+        // it to be NUL-terminated within that buffer.
+        const std::size_t length = wcsnlen(descriptor.cFileName, MAX_PATH);
+        entries.push_back(
+            {std::wstring(descriptor.cFileName, length), isDirectory});
+      }
+      GlobalUnlock(medium.hGlobal);
+      ok = true;
+    }
+  }
+  ReleaseStgMedium(&medium);
+  return ok;
+}
+
+// cFileName comes from the clipboard source and is not necessarily
+// trustworthy; reject anything rooted (a drive letter like "C:\..." or a
+// bare root directory like "\Windows\...", which path::is_absolute() alone
+// would miss since it requires both a root name and a root directory) and
+// any ".." segment, so a descriptor cannot cause a write outside
+// destination.
+bool IsSafeRelativePath(const std::wstring &relativePath) {
+  if (relativePath.empty())
+    return false;
+  const std::filesystem::path path(relativePath);
+  if (path.has_root_name() || path.has_root_directory())
+    return false;
+  for (const std::filesystem::path &part : path) {
+    if (part == L".." || part == L".")
+      return false;
+  }
+  return true;
+}
+
+HRESULT WriteVirtualFileContents(IDataObject *dataObject, UINT index,
+                                 const std::wstring &destinationPath) {
+  FORMATETC format{static_cast<CLIPFORMAT>(FileContentsClipboardFormat()),
+                   nullptr, DVASPECT_CONTENT, static_cast<LONG>(index),
+                   static_cast<DWORD>(TYMED_ISTREAM | TYMED_HGLOBAL)};
+  STGMEDIUM medium{};
+  if (FAILED(dataObject->GetData(&format, &medium)))
+    return E_FAIL;
+  const HANDLE file = CreateFileW(
+      ToExtendedPath(destinationPath).c_str(), GENERIC_WRITE, 0, nullptr,
+      CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+  HRESULT result = S_OK;
+  if (file == INVALID_HANDLE_VALUE) {
+    result = HRESULT_FROM_WIN32(GetLastError());
+  } else if (medium.tymed == TYMED_ISTREAM) {
+    std::vector<unsigned char> buffer(1U << 16);
+    while (true) {
+      ULONG read = 0;
+      const HRESULT readResult =
+          medium.pstm->Read(buffer.data(), static_cast<ULONG>(buffer.size()),
+                            &read);
+      if (FAILED(readResult)) {
+        result = readResult;
+        break;
+      }
+      if (read == 0)
+        break;
+      DWORD written = 0;
+      if (!WriteFile(file, buffer.data(), read, &written, nullptr) ||
+          written != read) {
+        result = HRESULT_FROM_WIN32(GetLastError());
+        break;
+      }
+      if (readResult == S_FALSE)
+        break;
+    }
+  } else if (medium.tymed == TYMED_HGLOBAL) {
+    if (const void *data = GlobalLock(medium.hGlobal)) {
+      const SIZE_T size = GlobalSize(medium.hGlobal);
+      DWORD written = 0;
+      if (!WriteFile(file, data, static_cast<DWORD>(size), &written,
+                     nullptr) ||
+          written != size) {
+        result = HRESULT_FROM_WIN32(GetLastError());
+      }
+      GlobalUnlock(medium.hGlobal);
+    } else {
+      result = E_FAIL;
+    }
+  } else {
+    result = E_FAIL;
+  }
+  if (file != INVALID_HANDLE_VALUE) {
+    CloseHandle(file);
+    // Don't leave a truncated file behind if writing failed partway
+    // through.
+    if (FAILED(result))
+      DeleteFileW(ToExtendedPath(destinationPath).c_str());
+  }
+  ReleaseStgMedium(&medium);
+  return result;
+}
+
+// Materializes the virtual files a CFSTR_FILEDESCRIPTORW/CFSTR_FILECONTENTS
+// IDataObject offers (Remote Desktop's clipboard redirection never places
+// CF_HDROP on the clipboard for a remote-to-local file copy, so RunPaste's
+// IFileOperation path never sees anything to copy).
+//
+// Fetches the clipboard's IDataObject itself (rather than receiving one
+// obtained by the caller) because that object lives in whichever COM
+// apartment retrieved it; an apartment-threaded IDataObject handed in from
+// the caller's thread cannot be called safely from this thread's own
+// apartment.
+void RunPasteVirtualFiles(HWND notifyWindow, DWORD notificationProcessId,
+                          OperationId operationId, std::wstring destination,
+                          OverwriteConfirmFn confirmOverwrite) {
+  // OleGetClipboard needs OleInitialize, not just CoInitializeEx (see the
+  // same note in main.cpp); the other worker threads in this file never
+  // touch the OLE clipboard/drag-drop APIs, so they don't need it.
+  const HRESULT initialize = OleInitialize(nullptr);
+  IDataObject *dataObject = nullptr;
+  // OleGetClipboard opens the clipboard internally, which can transiently
+  // fail (CLIPBRD_E_CANT_OPEN) if another application briefly holds it open
+  // (e.g. a clipboard manager reacting to the change); retry a few times
+  // rather than surface a spurious failure for that.
+  HRESULT result = E_FAIL;
+  for (int attempt = 0; attempt < 15 && FAILED(result); ++attempt) {
+    if (attempt > 0)
+      Sleep(20);
+    dataObject = nullptr;
+    result = OleGetClipboard(&dataObject);
+  }
+  if (SUCCEEDED(result) && dataObject == nullptr)
+    result = E_FAIL;
+  std::vector<VirtualFileEntry> entries;
+  if (SUCCEEDED(result)) {
+    result = ReadVirtualFileDescriptors(dataObject, entries) ? S_OK : E_FAIL;
+  }
+  bool overwriteAllConfirmed = false;
+  bool skipAllConfirmed = false;
+  bool userCancelled = false;
+  for (std::size_t index = 0;
+       index < entries.size() && SUCCEEDED(result) && !userCancelled;
+       ++index) {
+    const VirtualFileEntry &entry = entries[index];
+    if (!IsSafeRelativePath(entry.relativePath)) {
+      result = E_ACCESSDENIED;
+      break;
+    }
+    const std::filesystem::path fullPath =
+        std::filesystem::path(destination) / entry.relativePath;
+    std::error_code error;
+    if (entry.isDirectory) {
+      std::filesystem::create_directories(fullPath, error);
+      if (error)
+        result = HRESULT_FROM_WIN32(static_cast<DWORD>(error.value()));
+      continue;
+    }
+    std::filesystem::create_directories(fullPath.parent_path(), error);
+    bool skip = false;
+    if (PathExists(fullPath.wstring())) {
+      if (skipAllConfirmed) {
+        skip = true;
+      } else if (!overwriteAllConfirmed) {
+        switch (confirmOverwrite(notifyWindow, entry.relativePath)) {
+        case OverwriteConflictChoice::Overwrite:
+          break;
+        case OverwriteConflictChoice::OverwriteAll:
+          overwriteAllConfirmed = true;
+          break;
+        case OverwriteConflictChoice::Skip:
+          skip = true;
+          break;
+        case OverwriteConflictChoice::SkipAll:
+          skipAllConfirmed = true;
+          skip = true;
+          break;
+        case OverwriteConflictChoice::Cancel:
+          userCancelled = true;
+          break;
+        }
+      }
+    }
+    if (userCancelled || skip)
+      continue;
+    result = WriteVirtualFileContents(dataObject,
+                                      static_cast<UINT>(index),
+                                      fullPath.wstring());
+  }
+  if (dataObject != nullptr)
+    dataObject->Release();
+  if (SUCCEEDED(initialize))
+    OleUninitialize();
+  Notify(notifyWindow, notificationProcessId, operationId, result,
+         userCancelled);
+}
+
 } // namespace
 
 DuplicateConflictChoice ShowDuplicateConflictDialog(HWND owner,
@@ -231,6 +460,50 @@ DuplicateConflictChoice ShowDuplicateConflictDialog(HWND owner,
     return DuplicateConflictChoice::ApplyToAll;
   default:
     return DuplicateConflictChoice::Cancel;
+  }
+}
+
+OverwriteConflictChoice ShowOverwriteConflictDialog(HWND owner,
+                                                    const std::wstring &fileName) {
+  constexpr int kOverwriteId = 1001;
+  constexpr int kOverwriteAllId = 1002;
+  constexpr int kSkipId = 1003;
+  constexpr int kSkipAllId = 1004;
+  TASKDIALOG_BUTTON buttons[] = {
+      {kOverwriteId, L"上書きする"},
+      {kOverwriteAllId, L"すべて上書きする"},
+      {kSkipId, L"スキップする"},
+      {kSkipAllId, L"すべてスキップする"},
+  };
+  const std::wstring content =
+      L"「" + fileName + L"」は貼り付け先に既に存在します。";
+  TASKDIALOGCONFIG config{};
+  config.cbSize = sizeof(config);
+  config.hwndParent = owner;
+  config.dwFlags = static_cast<TASKDIALOG_FLAGS>(TDF_USE_COMMAND_LINKS |
+                                                 TDF_ALLOW_DIALOG_CANCELLATION);
+  config.dwCommonButtons = TDCBF_CANCEL_BUTTON;
+  config.pszWindowTitle = L"SimpleFiler";
+  config.pszMainIcon = TD_WARNING_ICON;
+  config.pszMainInstruction = L"上書きしますか?";
+  config.pszContent = content.c_str();
+  config.pButtons = buttons;
+  config.cButtons = static_cast<UINT>(std::size(buttons));
+  config.nDefaultButton = kOverwriteId;
+  int pressedButton = IDCANCEL;
+  if (FAILED(TaskDialogIndirect(&config, &pressedButton, nullptr, nullptr)))
+    return OverwriteConflictChoice::Cancel;
+  switch (pressedButton) {
+  case kOverwriteId:
+    return OverwriteConflictChoice::Overwrite;
+  case kOverwriteAllId:
+    return OverwriteConflictChoice::OverwriteAll;
+  case kSkipId:
+    return OverwriteConflictChoice::Skip;
+  case kSkipAllId:
+    return OverwriteConflictChoice::SkipAll;
+  default:
+    return OverwriteConflictChoice::Cancel;
   }
 }
 
@@ -355,11 +628,17 @@ std::vector<std::wstring> PathsFromDataObject(IDataObject *dataObject) {
 
 std::jthread PasteFilesAsync(HWND notifyWindow, OperationId operationId,
                              const std::wstring &destination,
-                             ConflictConfirmFn confirmConflict) {
+                             ConflictConfirmFn confirmConflict,
+                             OverwriteConfirmFn confirmOverwrite) {
   const DWORD notificationProcessId = NotificationProcessId(notifyWindow);
   bool cut = false;
   std::vector<std::wstring> paths = ReadFilesFromClipboard(&cut);
   if (paths.empty()) {
+    if (IsClipboardFormatAvailable(FileDescriptorClipboardFormat())) {
+      return std::jthread(RunPasteVirtualFiles, notifyWindow,
+                          notificationProcessId, operationId, destination,
+                          std::move(confirmOverwrite));
+    }
     Notify(notifyWindow, notificationProcessId, operationId,
            HRESULT_FROM_WIN32(ERROR_NO_MORE_ITEMS), false);
     return {};

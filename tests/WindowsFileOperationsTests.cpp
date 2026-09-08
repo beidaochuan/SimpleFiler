@@ -4,15 +4,21 @@
 #include "win/ShellOperations.h"
 
 #include <objbase.h>
+#include <ole2.h>
+#include <shlobj.h>
 #include <windows.h>
 
+#include <atomic>
 #include <chrono>
+#include <cstring>
+#include <cwchar>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <memory>
 #include <optional>
 #include <string>
+#include <vector>
 
 namespace {
 
@@ -82,11 +88,276 @@ bool RunCmdInDirectory(const std::filesystem::path &directory) {
          std::filesystem::exists(directory / L"cmd-marker.txt");
 }
 
+// Minimal IEnumFORMATETC used by TestFileDataObject::EnumFormatEtc. OLE's
+// clipboard calls this while OleSetClipboard is running to learn which
+// formats to pre-register as delayed-render entries on the classic
+// clipboard, which is what lets IsClipboardFormatAvailable see them later.
+class TestFormatEnumerator : public IEnumFORMATETC {
+public:
+  explicit TestFormatEnumerator(std::vector<FORMATETC> formats)
+      : formats_(std::move(formats)) {}
+
+  HRESULT __stdcall QueryInterface(REFIID riid, void **object) override {
+    if (riid == IID_IUnknown || riid == IID_IEnumFORMATETC) {
+      *object = static_cast<IEnumFORMATETC *>(this);
+      AddRef();
+      return S_OK;
+    }
+    *object = nullptr;
+    return E_NOINTERFACE;
+  }
+  ULONG __stdcall AddRef() override { return ++refCount_; }
+  ULONG __stdcall Release() override {
+    const ULONG count = --refCount_;
+    if (count == 0)
+      delete this;
+    return count;
+  }
+  HRESULT __stdcall Next(ULONG count, FORMATETC *result,
+                         ULONG *fetched) override {
+    ULONG copied = 0;
+    while (copied < count && index_ < formats_.size()) {
+      result[copied] = formats_[index_];
+      ++copied;
+      ++index_;
+    }
+    if (fetched != nullptr)
+      *fetched = copied;
+    return copied == count ? S_OK : S_FALSE;
+  }
+  HRESULT __stdcall Skip(ULONG count) override {
+    index_ += count;
+    return S_OK;
+  }
+  HRESULT __stdcall Reset() override {
+    index_ = 0;
+    return S_OK;
+  }
+  HRESULT __stdcall Clone(IEnumFORMATETC **result) override {
+    *result = new TestFormatEnumerator(formats_);
+    return S_OK;
+  }
+
+private:
+  std::vector<FORMATETC> formats_;
+  std::size_t index_ = 0;
+  std::atomic<ULONG> refCount_{1};
+};
+
+// A minimal IDataObject exposing CFSTR_FILEDESCRIPTORW / CFSTR_FILECONTENTS,
+// the virtual-file clipboard formats Remote Desktop's clipboard redirection
+// uses instead of CF_HDROP when copying files from the remote session. Used
+// to exercise PasteFilesAsync's virtual-file branch without a real RDP
+// session.
+class TestFileDataObject : public IDataObject {
+public:
+  struct Entry {
+    std::wstring name;
+    bool isDirectory = false;
+    std::string content;
+    // Real clipboard sources may offer contents as TYMED_HGLOBAL instead of
+    // TYMED_ISTREAM; set this to exercise WriteVirtualFileContents' other
+    // branch.
+    bool contentsAsHGlobal = false;
+  };
+
+  explicit TestFileDataObject(std::vector<Entry> entries)
+      : entries_(std::move(entries)) {}
+
+  HRESULT __stdcall QueryInterface(REFIID riid, void **object) override {
+    if (riid == IID_IUnknown || riid == IID_IDataObject) {
+      *object = static_cast<IDataObject *>(this);
+      AddRef();
+      return S_OK;
+    }
+    *object = nullptr;
+    return E_NOINTERFACE;
+  }
+  ULONG __stdcall AddRef() override { return ++refCount_; }
+  ULONG __stdcall Release() override {
+    const ULONG count = --refCount_;
+    if (count == 0)
+      delete this;
+    return count;
+  }
+
+  HRESULT __stdcall GetData(FORMATETC *format, STGMEDIUM *medium) override {
+    *medium = STGMEDIUM{};
+    if (format->cfFormat == DescriptorFormat() &&
+        (format->tymed & TYMED_HGLOBAL) != 0) {
+      return BuildDescriptor(medium);
+    }
+    if (format->cfFormat == ContentsFormat())
+      return BuildContents(format->lindex, medium);
+    return DV_E_FORMATETC;
+  }
+  HRESULT __stdcall GetDataHere(FORMATETC *, STGMEDIUM *) override {
+    return E_NOTIMPL;
+  }
+  HRESULT __stdcall QueryGetData(FORMATETC *format) override {
+    if (format->cfFormat == DescriptorFormat() ||
+        format->cfFormat == ContentsFormat()) {
+      return S_OK;
+    }
+    return DV_E_FORMATETC;
+  }
+  HRESULT __stdcall GetCanonicalFormatEtc(FORMATETC *,
+                                          FORMATETC *) override {
+    return E_NOTIMPL;
+  }
+  HRESULT __stdcall SetData(FORMATETC *, STGMEDIUM *, BOOL) override {
+    return E_NOTIMPL;
+  }
+  HRESULT __stdcall EnumFormatEtc(DWORD direction,
+                                  IEnumFORMATETC **result) override {
+    if (direction != DATADIR_GET) {
+      *result = nullptr;
+      return E_NOTIMPL;
+    }
+    std::vector<FORMATETC> formats = {
+        FORMATETC{static_cast<CLIPFORMAT>(DescriptorFormat()), nullptr,
+                  DVASPECT_CONTENT, -1, TYMED_HGLOBAL},
+        FORMATETC{static_cast<CLIPFORMAT>(ContentsFormat()), nullptr,
+                  DVASPECT_CONTENT, -1, TYMED_ISTREAM},
+    };
+    *result = new TestFormatEnumerator(std::move(formats));
+    return S_OK;
+  }
+  HRESULT __stdcall DAdvise(FORMATETC *, DWORD, IAdviseSink *,
+                            DWORD *) override {
+    return OLE_E_ADVISENOTSUPPORTED;
+  }
+  HRESULT __stdcall DUnadvise(DWORD) override { return E_NOTIMPL; }
+  HRESULT __stdcall EnumDAdvise(IEnumSTATDATA **) override {
+    return OLE_E_ADVISENOTSUPPORTED;
+  }
+
+private:
+  static UINT DescriptorFormat() {
+    static const UINT format = RegisterClipboardFormatW(CFSTR_FILEDESCRIPTORW);
+    return format;
+  }
+  static UINT ContentsFormat() {
+    static const UINT format = RegisterClipboardFormatW(CFSTR_FILECONTENTS);
+    return format;
+  }
+
+  HRESULT BuildDescriptor(STGMEDIUM *medium) {
+    const std::size_t count = entries_.size();
+    const std::size_t bytes = sizeof(FILEGROUPDESCRIPTORW) +
+                              (count > 0 ? count - 1 : 0) *
+                                  sizeof(FILEDESCRIPTORW);
+    const HGLOBAL global = GlobalAlloc(GMEM_MOVEABLE | GMEM_ZEROINIT, bytes);
+    if (global == nullptr)
+      return E_OUTOFMEMORY;
+    auto *group = static_cast<FILEGROUPDESCRIPTORW *>(GlobalLock(global));
+    if (group == nullptr) {
+      GlobalFree(global);
+      return E_FAIL;
+    }
+    group->cItems = static_cast<UINT>(count);
+    for (std::size_t index = 0; index < count; ++index) {
+      wcsncpy_s(group->fgd[index].cFileName, entries_[index].name.c_str(),
+                _TRUNCATE);
+      if (entries_[index].isDirectory) {
+        group->fgd[index].dwFlags = FD_ATTRIBUTES;
+        group->fgd[index].dwFileAttributes = FILE_ATTRIBUTE_DIRECTORY;
+      }
+    }
+    GlobalUnlock(global);
+    medium->tymed = TYMED_HGLOBAL;
+    medium->hGlobal = global;
+    medium->pUnkForRelease = nullptr;
+    return S_OK;
+  }
+
+  HRESULT BuildContents(LONG index, STGMEDIUM *medium) {
+    if (index < 0 || static_cast<std::size_t>(index) >= entries_.size())
+      return DV_E_LINDEX;
+    const Entry &entry = entries_[static_cast<std::size_t>(index)];
+    if (entry.isDirectory)
+      return DV_E_LINDEX;
+    if (entry.contentsAsHGlobal) {
+      const HGLOBAL global =
+          GlobalAlloc(GMEM_MOVEABLE, entry.content.size());
+      if (global == nullptr)
+        return E_OUTOFMEMORY;
+      void *data = GlobalLock(global);
+      if (data == nullptr) {
+        GlobalFree(global);
+        return E_FAIL;
+      }
+      if (!entry.content.empty())
+        memcpy(data, entry.content.data(), entry.content.size());
+      GlobalUnlock(global);
+      medium->tymed = TYMED_HGLOBAL;
+      medium->hGlobal = global;
+      medium->pUnkForRelease = nullptr;
+      return S_OK;
+    }
+    IStream *stream = nullptr;
+    if (FAILED(CreateStreamOnHGlobal(nullptr, TRUE, &stream)))
+      return E_FAIL;
+    if (!entry.content.empty()) {
+      ULONG written = 0;
+      stream->Write(entry.content.data(),
+                    static_cast<ULONG>(entry.content.size()), &written);
+    }
+    LARGE_INTEGER zero{};
+    stream->Seek(zero, STREAM_SEEK_SET, nullptr);
+    medium->tymed = TYMED_ISTREAM;
+    medium->pstm = stream;
+    return S_OK;
+  }
+
+  std::vector<Entry> entries_;
+  std::atomic<ULONG> refCount_{1};
+};
+
+// Places entries on the OLE clipboard as virtual files (as Remote Desktop's
+// clipboard redirection would) and drives PasteFilesAsync's virtual-file
+// branch against them.
+bool PasteVirtualFiles(HWND window, sf::win::OperationId operationId,
+                       const std::wstring &destination,
+                       std::vector<TestFileDataObject::Entry> entries,
+                       sf::win::OverwriteConfirmFn confirmOverwrite) {
+  auto *dataObject = new TestFileDataObject(std::move(entries));
+  // OleSetClipboard wraps OpenClipboard, which can transiently fail with
+  // CLIPBRD_E_CANT_OPEN if another thread/process (or Windows' own clipboard
+  // bookkeeping from the previous test case) briefly holds it; retry rather
+  // than treat that as a real failure.
+  HRESULT setResult = E_FAIL;
+  for (int attempt = 0; attempt < 25 && FAILED(setResult); ++attempt) {
+    if (attempt > 0) {
+      MSG message{};
+      while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) {
+        TranslateMessage(&message);
+        DispatchMessageW(&message);
+      }
+      Sleep(15);
+    }
+    setResult = OleSetClipboard(dataObject);
+  }
+  dataObject->Release();
+  if (FAILED(setResult))
+    return false;
+  std::jthread task = sf::win::PasteFilesAsync(
+      window, operationId, destination, sf::win::ShowDuplicateConflictDialog,
+      std::move(confirmOverwrite));
+  const bool completed = WaitForOperation(operationId);
+  task.join();
+  OleSetClipboard(nullptr);
+  return completed;
+}
+
 } // namespace
 
 int main() {
-  const HRESULT initialized =
-      CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+  // OleSetClipboard/OleGetClipboard (used by the virtual-file paste tests
+  // below) require OleInitialize, not just CoInitializeEx; OleInitialize
+  // initializes COM itself (as COINIT_APARTMENTTHREADED), matching the
+  // app's own main.cpp.
+  const HRESULT initialized = OleInitialize(nullptr);
   if (FAILED(initialized)) {
     std::cerr << "COM initialization failed\n";
     return 1;
@@ -99,7 +370,7 @@ int main() {
   if (RegisterClassW(&windowClass) == 0 &&
       GetLastError() != ERROR_CLASS_ALREADY_EXISTS) {
     std::cerr << "Test window class registration failed\n";
-    CoUninitialize();
+    OleUninitialize();
     return 1;
   }
   const HWND window =
@@ -107,7 +378,7 @@ int main() {
                       HWND_MESSAGE, nullptr, windowClass.hInstance, nullptr);
   if (window == nullptr) {
     std::cerr << "Test message window creation failed\n";
-    CoUninitialize();
+    OleUninitialize();
     return 1;
   }
 
@@ -264,9 +535,123 @@ int main() {
   check(!std::filesystem::exists(destination / L"cancel - コピー.txt"),
         "Cancelling should not create a duplicate for the conflicting file");
 
+  // Remote Desktop's clipboard redirection never places CF_HDROP on the
+  // clipboard when copying files from the remote session; it uses the
+  // virtual-file formats CFSTR_FILEDESCRIPTORW/CFSTR_FILECONTENTS instead.
+  // The following exercise PasteFilesAsync's fallback for that case.
+  ResetOperation();
+  constexpr sf::win::OperationId virtualFileOperationId = 9;
+  check(PasteVirtualFiles(
+            window, virtualFileOperationId, destination.wstring(),
+            {{L"remote.txt", false, "from remote desktop"}},
+            [](HWND, const std::wstring &) {
+              return sf::win::OverwriteConflictChoice::Overwrite;
+            }),
+        "Pasting a virtual file (as Remote Desktop offers) should complete");
+  check(std::filesystem::exists(destination / L"remote.txt"),
+        "Virtual file paste should materialize the file at the destination");
+  {
+    std::ifstream stream(destination / L"remote.txt", std::ios::binary);
+    std::string content((std::istreambuf_iterator<char>(stream)),
+                        std::istreambuf_iterator<char>());
+    check(content == "from remote desktop",
+          "Virtual file paste should write the remote file's actual content");
+  }
+
+  ResetOperation();
+  constexpr sf::win::OperationId virtualFileHGlobalOperationId = 14;
+  check(PasteVirtualFiles(
+            window, virtualFileHGlobalOperationId, destination.wstring(),
+            {{L"remote-hglobal.txt", false, "hglobal contents", true}},
+            [](HWND, const std::wstring &) {
+              return sf::win::OverwriteConflictChoice::Overwrite;
+            }),
+        "Pasting a virtual file offered as TYMED_HGLOBAL should complete");
+  {
+    std::ifstream stream(destination / L"remote-hglobal.txt",
+                         std::ios::binary);
+    std::string content((std::istreambuf_iterator<char>(stream)),
+                        std::istreambuf_iterator<char>());
+    check(content == "hglobal contents",
+          "TYMED_HGLOBAL contents should be written just like TYMED_ISTREAM");
+  }
+
+  ResetOperation();
+  constexpr sf::win::OperationId virtualFolderOperationId = 10;
+  check(PasteVirtualFiles(
+            window, virtualFolderOperationId, destination.wstring(),
+            {{L"remote-folder", true, ""},
+             {L"remote-folder\\nested.txt", false, "nested contents"}},
+            [](HWND, const std::wstring &) {
+              return sf::win::OverwriteConflictChoice::Overwrite;
+            }),
+        "Pasting a virtual folder tree should complete");
+  check(std::filesystem::is_directory(destination / L"remote-folder"),
+        "Virtual folder paste should create the subfolder");
+  check(std::filesystem::exists(destination / L"remote-folder" /
+                                L"nested.txt"),
+        "Virtual folder paste should create files nested inside the subfolder");
+
+  ResetOperation();
+  constexpr sf::win::OperationId virtualTraversalOperationId = 11;
+  const bool traversalRejected =
+      !PasteVirtualFiles(
+          window, virtualTraversalOperationId, destination.wstring(),
+          {{L"..\\escape.txt", false, "should not escape"}},
+          [](HWND, const std::wstring &) {
+            return sf::win::OverwriteConflictChoice::Overwrite;
+          }) &&
+      operationResult && FAILED(operationResult->result);
+  check(traversalRejected,
+        "A '..' entry in a virtual file descriptor should be rejected, not "
+        "written outside the destination");
+  check(!std::filesystem::exists(root / L"escape.txt"),
+        "Rejecting a traversal entry should not create a file outside the "
+        "destination");
+
+  const std::filesystem::path overwriteTarget = destination / L"existing.txt";
+  check(WriteTestFile(overwriteTarget, "original"),
+        "Overwrite-conflict target should be created");
+  ResetOperation();
+  constexpr sf::win::OperationId virtualSkipOperationId = 12;
+  check(PasteVirtualFiles(
+            window, virtualSkipOperationId, destination.wstring(),
+            {{L"existing.txt", false, "replacement"}},
+            [](HWND, const std::wstring &) {
+              return sf::win::OverwriteConflictChoice::Skip;
+            }),
+        "Skipping an overwrite conflict should still complete the batch");
+  {
+    std::ifstream stream(overwriteTarget, std::ios::binary);
+    std::string content((std::istreambuf_iterator<char>(stream)),
+                        std::istreambuf_iterator<char>());
+    check(content == "original",
+          "Skip should leave the existing file's content untouched");
+  }
+
+  ResetOperation();
+  constexpr sf::win::OperationId virtualCancelOperationId = 13;
+  const bool overwriteCancelled =
+      !PasteVirtualFiles(
+          window, virtualCancelOperationId, destination.wstring(),
+          {{L"existing.txt", false, "replacement"}},
+          [](HWND, const std::wstring &) {
+            return sf::win::OverwriteConflictChoice::Cancel;
+          }) &&
+      operationResult && operationResult->aborted;
+  check(overwriteCancelled,
+        "Cancelling an overwrite conflict should abort the virtual paste");
+  {
+    std::ifstream stream(overwriteTarget, std::ios::binary);
+    std::string content((std::istreambuf_iterator<char>(stream)),
+                        std::istreambuf_iterator<char>());
+    check(content == "original",
+          "Cancelling an overwrite conflict should leave the file untouched");
+  }
+
   DestroyWindow(window);
   std::filesystem::remove_all(root, error);
-  CoUninitialize();
+  OleUninitialize();
   if (failures == 0)
     std::cout << "Windows file operation tests passed\n";
   return failures == 0 ? 0 : 1;

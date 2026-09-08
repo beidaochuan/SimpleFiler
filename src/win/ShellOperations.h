@@ -35,6 +35,19 @@ using ConflictConfirmFn = std::function<DuplicateConflictChoice(
 [[nodiscard]] DuplicateConflictChoice
 ShowDuplicateConflictDialog(HWND owner, const std::wstring &fileName);
 
+// A conflict occurs when pasting a virtual file (see PasteFilesAsync) over a
+// file that already exists at the destination. Overwrite/Skip apply once;
+// the *All variants suppress further prompts for the rest of the batch.
+enum class OverwriteConflictChoice { Overwrite, OverwriteAll, Skip, SkipAll,
+                                     Cancel };
+
+using OverwriteConfirmFn = std::function<OverwriteConflictChoice(
+    HWND owner, const std::wstring &fileName)>;
+
+// Shows a TaskDialogIndirect prompt asking whether to overwrite fileName.
+[[nodiscard]] OverwriteConflictChoice
+ShowOverwriteConflictDialog(HWND owner, const std::wstring &fileName);
+
 [[nodiscard]] bool PutFilesOnClipboard(HWND owner,
                                        const std::vector<std::wstring> &paths,
                                        bool cut);
@@ -45,10 +58,16 @@ ShowDuplicateConflictDialog(HWND owner, const std::wstring &fileName);
 // CF_HDROP or the medium cannot be locked.
 [[nodiscard]] std::vector<std::wstring>
 PathsFromDataObject(IDataObject *dataObject);
+// Pastes CF_HDROP files from the clipboard as before. If the clipboard holds
+// no CF_HDROP but exposes virtual files instead (CFSTR_FILEDESCRIPTORW /
+// CFSTR_FILECONTENTS, as used by Remote Desktop's clipboard redirection when
+// copying files from the remote session), materializes those into
+// destination instead.
 [[nodiscard]] std::jthread
 PasteFilesAsync(HWND notifyWindow, OperationId operationId,
                 const std::wstring &destination,
-                ConflictConfirmFn confirmConflict = ShowDuplicateConflictDialog);
+                ConflictConfirmFn confirmConflict = ShowDuplicateConflictDialog,
+                OverwriteConfirmFn confirmOverwrite = ShowOverwriteConflictDialog);
 [[nodiscard]] std::jthread TransferFilesAsync(
     HWND notifyWindow, OperationId operationId,
     std::vector<std::wstring> paths, std::wstring destination, bool move,
