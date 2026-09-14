@@ -105,7 +105,14 @@ void PaneController::Navigate(HWND window, int paneIndex,
   RetireWorker(pane);
   pane.pendingSelectionPath.clear();
   pane.pendingRenameOnSelect = false;
-  pane.path = path.wstring();
+  const std::wstring newPath = path.wstring();
+  if (!pane.path.empty() && !pane.sortCustomizedByUser &&
+      _wcsicmp(pane.path.c_str(), newPath.c_str()) != 0 &&
+      IsDownloadsFolder(newPath)) {
+    pane.sortColumn = 3;
+    pane.sortAscending = false;
+  }
+  pane.path = newPath;
   pane.searchMode = false;
   pane.searchRoot.clear();
   pane.searchQuery.clear();
@@ -451,6 +458,7 @@ void PaneController::HandleColumnClick(int paneIndex, int subItem) {
     pane.sortColumn = sortColumn;
     pane.sortAscending = true;
   }
+  pane.sortCustomizedByUser = true;
   SortPane(paneIndex);
 }
 

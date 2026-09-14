@@ -103,6 +103,7 @@ private:
     bool showHidden = false;
     int sortColumn = 0;
     bool sortAscending = true;
+    bool sortCustomizedByUser = false;
     std::vector<std::wstring> history;
     std::size_t historyIndex = 0;
     std::wstring ascendedChildPath;

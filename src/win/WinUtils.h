@@ -4,6 +4,7 @@
 
 #include <windows.h>
 
+#include <shlobj.h>
 #include <shobjidl.h>
 
 #include <filesystem>
@@ -143,6 +144,24 @@ inline bool PathExists(const std::wstring &path) {
 
 inline bool IsUncPath(const std::wstring &path) {
   return path.size() >= 2 && path[0] == L'\\' && path[1] == L'\\';
+}
+
+inline bool IsDownloadsFolder(const std::wstring &path) {
+  PWSTR downloadsPath = nullptr;
+  if (FAILED(SHGetKnownFolderPath(FOLDERID_Downloads, 0, nullptr,
+                                  &downloadsPath))) {
+    return false;
+  }
+  std::wstring trimmed = path;
+  while (trimmed.size() > 1 &&
+         (trimmed.back() == L'\\' || trimmed.back() == L'/')) {
+    trimmed.pop_back();
+  }
+  const bool match =
+      CompareStringOrdinal(trimmed.c_str(), -1, downloadsPath, -1, TRUE) ==
+      CSTR_EQUAL;
+  CoTaskMemFree(downloadsPath);
+  return match;
 }
 
 inline bool SameVolume(const std::wstring &pathA, const std::wstring &pathB) {
